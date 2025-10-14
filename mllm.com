@@ -1,11 +1,11 @@
 #!/bin/bash
-#SBATCH --partition=cpu-48h
+#SBATCH --partition=a5000-48h
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=t.ranasinghe@lancaster.ac.uk
 
 export HF_HOME=/mnt/nfs/homes/ranasint/hf_home
 
 
-python -m
+python -m mllm.llama
 
 
