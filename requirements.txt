@@ -3,3 +3,6 @@ scipy
 numpy
 transformers
 OpenAI
+evaluate
+sacrebleu
+pycocoevalcap
