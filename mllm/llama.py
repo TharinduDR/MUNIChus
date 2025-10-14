@@ -43,7 +43,7 @@ def generate_caption(image, news_content, language):
     """Generate caption using Llama-3.2-11B-Vision"""
 
     # Create prompt with news content and language specification
-    prompt = f"""Given this news article and image, write a short newspaper caption in {language_names[language]}.
+    prompt = f"""Given this news article and image, write a short caption for the image in {language_names[language]}.
 
 News Article:
 {news_content[:500]}...
