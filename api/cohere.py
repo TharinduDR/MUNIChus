@@ -8,9 +8,10 @@ from io import BytesIO
 from sacrebleu.metrics import BLEU
 from pycocoevalcap.cider.cider import Cider
 import time
+import sys
 
 # Initialize Cohere client
-COHERE_API_KEY = "your-api-key-here"  # Replace with your API key
+COHERE_API_KEY = "your-api-key-here"
 co = cohere.ClientV2(COHERE_API_KEY)
 
 # Initialize metrics
@@ -34,22 +35,29 @@ language_names = {
 }
 
 
-def image_to_base64(image):
-    """Convert PIL Image to base64 string"""
-    buffered = BytesIO()
-    image.save(buffered, format="JPEG")
-    img_str = base64.b64encode(buffered.getvalue()).decode()
-    return img_str
+def image_to_data_url(image):
+    """Convert PIL Image to data URL"""
+    try:
+        buffered = BytesIO()
+        image.save(buffered, format="JPEG")
+        img_base64 = base64.b64encode(buffered.getvalue()).decode()
+        return f"data:image/jpeg;base64,{img_base64}"
+    except Exception as e:
+        print(f"Error converting image: {e}")
+        return None
 
 
 def generate_caption_cohere(image, news_content, language, max_retries=3):
     """Generate caption using Cohere command-a-vision-07-2025"""
 
-    # Convert image to base64
-    image_base64 = image_to_base64(image)
+    # Convert image to data URL
+    image_url = image_to_data_url(image)
+    if image_url is None:
+        return ""
 
     # Create prompt
     prompt = f"""Given this image and its news article, write a short caption for the image in {language_names[language]}. Try to identify famous people, locations and organisations in the image linking it to the news article and include them in the image caption.
+
 
 News Article:
 {news_content[:500]}...
@@ -67,11 +75,7 @@ Write only the caption in {language_names[language]}, nothing else."""
                         "content": [
                             {
                                 "type": "image",
-                                "source": {
-                                    "type": "base64",
-                                    "media_type": "image/jpeg",
-                                    "data": image_base64
-                                }
+                                "image": image_url  # Correct format!
                             },
                             {
                                 "type": "text",
@@ -88,7 +92,7 @@ Write only the caption in {language_names[language]}, nothing else."""
         except Exception as e:
             if attempt < max_retries - 1:
                 print(f"Retry {attempt + 1}/{max_retries} due to error: {e}")
-                time.sleep(2)  # Wait before retry
+                time.sleep(2)
             else:
                 print(f"Failed after {max_retries} attempts: {e}")
                 return ""
@@ -103,12 +107,16 @@ def evaluate_language(lang_code, dataset_name="tharindu/MUNIChus", num_samples=N
     print(f"Evaluating {language_names[lang_code]} ({lang_code})")
     print(f"{'=' * 80}")
 
-    # Load test set
-    dataset = load_dataset(dataset_name, lang_code)
-    test_data = dataset['test']
+    try:
+        dataset = load_dataset(dataset_name, lang_code)
+        test_data = dataset['test']
 
-    if num_samples:
-        test_data = test_data.select(range(min(num_samples, len(test_data))))
+        if num_samples:
+            test_data = test_data.select(range(min(num_samples, len(test_data))))
+
+    except Exception as e:
+        print(f"✗ Failed to load dataset: {e}")
+        return None, None, None
 
     predictions = []
     references = []
@@ -125,14 +133,12 @@ def evaluate_language(lang_code, dataset_name="tharindu/MUNIChus", num_samples=N
             predictions.append(generated_caption)
             references.append([example['caption']])
 
-            # Print sample outputs
             if i < 3:
                 print(f"\nSample {i + 1}:")
                 print(f"Generated: {generated_caption}")
                 print(f"Reference: {example['caption']}")
                 print("-" * 80)
 
-            # Rate limiting: sleep briefly between requests
             time.sleep(0.5)
 
         except Exception as e:
@@ -140,30 +146,37 @@ def evaluate_language(lang_code, dataset_name="tharindu/MUNIChus", num_samples=N
             predictions.append("")
             references.append([example['caption']])
 
-    # Calculate BLEU-4
-    print(f"\nCalculating BLEU-4 for {lang_code}...")
-    references_transposed = [[ref[0] for ref in references]]
-    bleu_score = bleu_metric.corpus_score(predictions, references_transposed)
+    valid_predictions = [p for p in predictions if p]
+    if not valid_predictions:
+        print(f"✗ No valid predictions for {lang_code}")
+        return None, predictions, references
 
-    # Calculate CIDEr
-    print(f"Calculating CIDEr for {lang_code}...")
-    predictions_dict = {i: [pred] for i, pred in enumerate(predictions)}
-    references_dict = {i: refs for i, refs in enumerate(references)}
-    cider_score, _ = cider_scorer.compute_score(references_dict, predictions_dict)
+    try:
+        # Calculate metrics
+        references_transposed = [[ref[0] for ref in references]]
+        bleu_score = bleu_metric.corpus_score(predictions, references_transposed)
 
-    results = {
-        "language": lang_code,
-        "language_name": language_names[lang_code],
-        "num_samples": len(predictions),
-        "bleu4": bleu_score.score,
-        "cider": cider_score * 100
-    }
+        predictions_dict = {i: [pred] for i, pred in enumerate(predictions)}
+        references_dict = {i: refs for i, refs in enumerate(references)}
+        cider_score, _ = cider_scorer.compute_score(references_dict, predictions_dict)
 
-    print(f"\nResults for {language_names[lang_code]}:")
-    print(f"  BLEU-4: {results['bleu4']:.2f}")
-    print(f"  CIDEr:  {results['cider']:.2f}")
+        results = {
+            "language": lang_code,
+            "language_name": language_names[lang_code],
+            "num_samples": len(predictions),
+            "bleu4": bleu_score.score,
+            "cider": cider_score * 100
+        }
 
-    return results, predictions, references
+        print(f"\nResults for {language_names[lang_code]}:")
+        print(f"  BLEU-4: {results['bleu4']:.2f}")
+        print(f"  CIDEr:  {results['cider']:.2f}")
+
+        return results, predictions, references
+
+    except Exception as e:
+        print(f"✗ Error calculating metrics: {e}")
+        return None, predictions, references
 
 
 # Evaluate all languages
@@ -176,38 +189,34 @@ for lang in languages:
         results, preds, refs = evaluate_language(
             lang,
             dataset_name="tharindu/MUNIChus",
-            num_samples=None  # Set to 10-100 for quick testing
+            num_samples=10  # Start with 10 for testing
         )
-        all_results.append(results)
-        all_predictions[lang] = preds
-        all_references[lang] = refs
+
+        if results is not None:
+            all_results.append(results)
+            all_predictions[lang] = preds
+            all_references[lang] = refs
 
     except Exception as e:
-        print(f"Error evaluating {lang}: {e}")
+        print(f"✗ Error evaluating {lang}: {e}")
         continue
 
-# Create results DataFrame
-results_df = pd.DataFrame(all_results)
+if not all_results:
+    print("\n✗ No results generated!")
+    sys.exit(1)
 
-# Print summary
+# Save results
+results_df = pd.DataFrame(all_results)
 print("\n" + "=" * 80)
-print("FINAL RESULTS SUMMARY - COHERE command-a-vision-07-2025")
+print("FINAL RESULTS - COHERE command-a-vision-07-2025")
 print("=" * 80)
 print(results_df.to_string(index=False))
 
-# Save results
 results_df.to_csv("cohere_vision_evaluation_results.csv", index=False)
-print("\n✓ Results saved to cohere_vision_evaluation_results.csv")
 
-# Save detailed predictions
 with open("cohere_vision_predictions.json", "w", encoding="utf-8") as f:
-    json.dump({
-        "predictions": all_predictions,
-        "references": all_references
-    }, f, ensure_ascii=False, indent=2)
-print("✓ Predictions saved to cohere_vision_predictions.json")
+    json.dump({"predictions": all_predictions, "references": all_references},
+              f, ensure_ascii=False, indent=2)
 
-# Calculate averages
-print("\nAverage Scores:")
-print(f"  Average BLEU-4: {results_df['bleu4'].mean():.2f}")
-print(f"  Average CIDEr:  {results_df['cider'].mean():.2f}")
+print(f"\nAverage BLEU-4: {results_df['bleu4'].mean():.2f}")
+print(f"Average CIDEr:  {results_df['cider'].mean():.2f}")
