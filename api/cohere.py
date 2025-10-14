@@ -11,7 +11,7 @@ import time
 
 # Initialize Cohere client
 COHERE_API_KEY = "your-api-key-here"  # Replace with your API key
-co = cohere.Client(COHERE_API_KEY)
+co = cohere.ClientV2(COHERE_API_KEY)
 
 # Initialize metrics
 bleu_metric = BLEU(max_ngram_order=4)
@@ -43,13 +43,13 @@ def image_to_base64(image):
 
 
 def generate_caption_cohere(image, news_content, language, max_retries=3):
-    """Generate caption using Cohere Vision API"""
+    """Generate caption using Cohere command-a-vision-07-2025"""
 
     # Convert image to base64
     image_base64 = image_to_base64(image)
 
     # Create prompt
-    prompt = f"""Given this news article and image, write a short newspaper caption in {language_names[language]}.
+    prompt = f"""Given this image and its news article, write a short caption for the image in {language_names[language]}. Try to identify famous people, locations and organisations in the image linking it to the news article and include them in the image caption.
 
 News Article:
 {news_content[:500]}...
@@ -60,12 +60,29 @@ Write only the caption in {language_names[language]}, nothing else."""
     for attempt in range(max_retries):
         try:
             response = co.chat(
-                model="command-r-plus-08-2024",  # Cohere's vision model
-                message=prompt,
-                images=[image_base64]
+                model="command-a-vision-07-2025",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": "image/jpeg",
+                                    "data": image_base64
+                                }
+                            },
+                            {
+                                "type": "text",
+                                "text": prompt
+                            }
+                        ]
+                    }
+                ]
             )
 
-            caption = response.text.strip()
+            caption = response.message.content[0].text.strip()
             return caption
 
         except Exception as e:
@@ -174,7 +191,7 @@ results_df = pd.DataFrame(all_results)
 
 # Print summary
 print("\n" + "=" * 80)
-print("FINAL RESULTS SUMMARY - COHERE")
+print("FINAL RESULTS SUMMARY - COHERE command-a-vision-07-2025")
 print("=" * 80)
 print(results_df.to_string(index=False))
 
