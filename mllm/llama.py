@@ -4,8 +4,9 @@ from transformers import MllamaForConditionalGeneration, AutoProcessor
 from datasets import load_dataset
 from tqdm import tqdm
 import pandas as pd
-from evaluate import load
 import json
+from sacrebleu.metrics import BLEU
+from pycocoevalcap.cider.cider import Cider
 
 # Load model
 print("Loading Llama-3.2-11B-Vision-Instruct...")
@@ -17,14 +18,13 @@ model = MllamaForConditionalGeneration.from_pretrained(
 )
 processor = AutoProcessor.from_pretrained(model_id)
 
-# Load metrics
-bleu = load("bleu")
-cider = load("cider")
+# Initialize metrics
+bleu_metric = BLEU(max_ngram_order=4)
+cider_scorer = Cider()
 
 # Language codes
 languages = ["ar", "en", "fr", "hi", "id", "ja", "si", "ur", "yue", "zh"]
 
-# Language names for prompts
 language_names = {
     "ar": "Arabic",
     "en": "English",
@@ -42,8 +42,7 @@ language_names = {
 def generate_caption(image, news_content, language):
     """Generate caption using Llama-3.2-11B-Vision"""
 
-    # Create prompt with news content and language specification
-    prompt = f"""Given this news article and image, write a short caption for the image in {language_names[language]}.
+    prompt = f"""Given this news article and image, write a short newspaper caption in {language_names[language]}.
 
 News Article:
 {news_content[:500]}...
@@ -70,11 +69,16 @@ Write only the caption in {language_names[language]}, nothing else:"""
 
     generated_text = processor.decode(output[0], skip_special_tokens=True)
 
-    # Extract only the caption (after the prompt)
-    # The model returns the full conversation, so we need to extract just the response
+    # Extract caption - remove the prompt part
+    # Split by common markers
     if "assistant" in generated_text.lower():
         caption = generated_text.split("assistant")[-1].strip()
+    elif language_names[language] in generated_text:
+        # Try to extract text after the language mention
+        parts = generated_text.split(language_names[language])
+        caption = parts[-1].strip().lstrip(':').strip()
     else:
+        # Take everything after the prompt
         caption = generated_text.split(prompt)[-1].strip()
 
     return caption
@@ -100,7 +104,6 @@ def evaluate_language(lang_code, dataset_name="tharindu/MUNIChus", num_samples=N
     # Generate captions
     for i, example in enumerate(tqdm(test_data, desc=f"Generating {lang_code}")):
         try:
-            # Generate caption
             generated_caption = generate_caption(
                 example['image'],
                 example['content'],
@@ -108,9 +111,8 @@ def evaluate_language(lang_code, dataset_name="tharindu/MUNIChus", num_samples=N
             )
 
             predictions.append(generated_caption)
-            references.append([example['caption']])  # BLEU/CIDEr expect list of references
+            references.append([example['caption']])
 
-            # Print sample outputs
             if i < 3:
                 print(f"\nSample {i + 1}:")
                 print(f"Generated: {generated_caption}")
@@ -122,24 +124,23 @@ def evaluate_language(lang_code, dataset_name="tharindu/MUNIChus", num_samples=N
             predictions.append("")
             references.append([example['caption']])
 
-    # Calculate metrics
-    print(f"\nCalculating metrics for {lang_code}...")
+    # Calculate BLEU-4
+    print(f"\nCalculating BLEU-4 for {lang_code}...")
+    references_transposed = [[ref[0] for ref in references]]
+    bleu_score = bleu_metric.corpus_score(predictions, references_transposed)
 
-    # BLEU-4
-    bleu_score = bleu.compute(predictions=predictions, references=references, max_order=4)
-
-    # CIDEr
-    # CIDEr expects dict format
+    # Calculate CIDEr
+    print(f"Calculating CIDEr for {lang_code}...")
     predictions_dict = {i: [pred] for i, pred in enumerate(predictions)}
     references_dict = {i: refs for i, refs in enumerate(references)}
-    cider_score = cider.compute(predictions=predictions_dict, references=references_dict)
+    cider_score, _ = cider_scorer.compute_score(references_dict, predictions_dict)
 
     results = {
         "language": lang_code,
         "language_name": language_names[lang_code],
         "num_samples": len(predictions),
-        "bleu4": bleu_score['bleu'] * 100,  # Convert to percentage
-        "cider": cider_score['score']
+        "bleu4": bleu_score.score,
+        "cider": cider_score * 100
     }
 
     print(f"\nResults for {language_names[lang_code]}:")
@@ -159,7 +160,7 @@ for lang in languages:
         results, preds, refs = evaluate_language(
             lang,
             dataset_name="tharindu/MUNIChus",
-            num_samples=None  # Set to a number like 100 for quick testing
+            num_samples=None  # Set to 10-100 for quick testing
         )
         all_results.append(results)
         all_predictions[lang] = preds
@@ -174,7 +175,7 @@ results_df = pd.DataFrame(all_results)
 
 # Print summary
 print("\n" + "=" * 80)
-print("FINAL RESULTS SUMMARY")
+print("FINAL RESULTS SUMMARY - LLAMA 3.2 11B VISION")
 print("=" * 80)
 print(results_df.to_string(index=False))
 
@@ -190,7 +191,7 @@ with open("llama_vision_predictions.json", "w", encoding="utf-8") as f:
     }, f, ensure_ascii=False, indent=2)
 print("✓ Predictions saved to llama_vision_predictions.json")
 
-# Calculate average scores
+# Calculate averages
 print("\nAverage Scores:")
 print(f"  Average BLEU-4: {results_df['bleu4'].mean():.2f}")
 print(f"  Average CIDEr:  {results_df['cider'].mean():.2f}")
