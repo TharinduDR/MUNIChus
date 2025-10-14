@@ -189,7 +189,6 @@ for lang in languages:
         results, preds, refs = evaluate_language(
             lang,
             dataset_name="tharindu/MUNIChus",
-            num_samples=10  # Start with 10 for testing
         )
 
         if results is not None:
