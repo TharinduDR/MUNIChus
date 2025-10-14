@@ -4,7 +4,7 @@
 #SBATCH --mail-user=t.ranasinghe@lancaster.ac.uk
 
 export HF_HOME=/mnt/nfs/homes/ranasint/hf_home
-
+huggingface-cli login --token
 
 python -m mllm.llama
 
