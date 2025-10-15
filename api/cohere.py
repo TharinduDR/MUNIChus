@@ -115,7 +115,7 @@ Caption in {language_names[language]}:"""
     for attempt in range(max_retries):
         try:
             response = co.chat(
-                model="command-a-vision-07-2025",
+                model="c4ai-aya-vision-32b",
                 messages=[
                     {
                         "role": "user",
