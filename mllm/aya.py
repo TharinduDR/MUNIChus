@@ -104,7 +104,7 @@ def generate_caption_aya(image, news_content, language):
 
     Guidelines:
     - Write in {language_names[language]} language only
-    - Keep it brief
+    - Keep it brief (10-12 words)
     - Identify and include: people's names, locations, and organizations visible in the image
     - Connect what you see in the image to the news context
     - Use journalistic style (factual, clear, objective)
