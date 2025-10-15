@@ -23,9 +23,7 @@ except ImportError:
 
 # Initialize OpenAI client
 print("Initializing OpenAI client...")
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")  # or set directly: "your-api-key-here"
-if not OPENAI_API_KEY:
-    raise ValueError("Please set OPENAI_API_KEY environment variable")
+OPENAI_API_KEY = "your-api-key-here"
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
