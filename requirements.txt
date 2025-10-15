@@ -6,3 +6,6 @@ OpenAI
 evaluate
 sacrebleu
 pycocoevalcap
+jieba
+mecab-python3
+unidic-lite

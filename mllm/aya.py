@@ -57,7 +57,7 @@ def generate_caption_aya(image, news_content, language):
     image_url = pil_image_to_url(image)
 
     # Create prompt
-    prompt = f"""Given this news article and image, write a short newspaper caption in {language_names[language]}.
+    prompt = f"""Given this image and its news article, write a short caption for the image in {language_names[language]}. Try to identify people names, locations and organisations in the image linking it to the news article and include them in the image caption.
 
 News Article:
 {news_content[:500]}...
