@@ -1,10 +1,11 @@
 import torch
 from transformers import (
     AutoProcessor,
-    AutoModelForVision2Seq,
+    AutoModel,
     BitsAndBytesConfig,
     TrainingArguments,
-    Trainer
+    Trainer,
+    pipeline
 )
 from peft import (
     LoraConfig,
@@ -182,30 +183,46 @@ Caption in {language}:"""
                     {"type": "image", "url": image_url},
                     {"type": "text", "text": prompt}
                 ]
-            },
-            {
-                "role": "assistant",
-                "content": item['caption']
             }
         ]
 
-        # Process inputs
-        text_input = self.processor.apply_chat_template(messages, tokenize=False)
-        inputs = self.processor(
-            images=item['image'],
-            text=text_input,
-            return_tensors="pt",
-            padding="max_length",
-            truncation=True,
-            max_length=2048
-        )
+        # Add the target caption as assistant response
+        full_text = f"{prompt}\n{item['caption']}"
+
+        # Process with the processor
+        try:
+            # For Aya Vision, we need to handle the special format
+            inputs = self.processor(
+                text=[full_text],  # Pass as list
+                images=[item['image']],  # Pass image as list
+                return_tensors="pt",
+                padding="max_length",
+                truncation=True,
+                max_length=2048
+            )
+        except:
+            # Fallback approach if the above doesn't work
+            inputs = self.processor(
+                text=full_text,
+                images=item['image'],
+                return_tensors="pt",
+                padding="max_length",
+                truncation=True,
+                max_length=2048
+            )
 
         # Flatten batch dimension
-        inputs = {k: v.squeeze(0) for k, v in inputs.items()}
+        inputs = {k: v.squeeze(0) if v.dim() > 1 else v for k, v in inputs.items()}
 
-        # Add labels (same as input_ids but with padding tokens set to -100)
-        inputs['labels'] = inputs['input_ids'].clone()
-        inputs['labels'][inputs['labels'] == self.processor.tokenizer.pad_token_id] = -100
+        # Create labels
+        if 'input_ids' in inputs:
+            inputs['labels'] = inputs['input_ids'].clone()
+            # Set padding tokens to -100 in labels
+            if hasattr(self.processor, 'tokenizer') and hasattr(self.processor.tokenizer, 'pad_token_id'):
+                pad_token_id = self.processor.tokenizer.pad_token_id
+            else:
+                pad_token_id = 0  # Default fallback
+            inputs['labels'][inputs['labels'] == pad_token_id] = -100
 
         return inputs
 
@@ -228,16 +245,33 @@ def setup_model_and_tokenizer(model_args, lora_args):
             load_in_8bit=True,
         )
 
-    # Load model
+    # Load model - use AutoModel with trust_remote_code for Aya Vision
     print(f"Loading model: {model_args.model_name_or_path}")
-    model = AutoModelForVision2Seq.from_pretrained(
-        model_args.model_name_or_path,
-        quantization_config=bnb_config,
-        device_map="auto",
-        cache_dir=model_args.cache_dir,
-        use_auth_token=model_args.use_auth_token,
-        trust_remote_code=True
-    )
+    try:
+        # First try loading with AutoModel and trust_remote_code
+        model = AutoModel.from_pretrained(
+            model_args.model_name_or_path,
+            quantization_config=bnb_config,
+            device_map="auto",
+            cache_dir=model_args.cache_dir,
+            use_auth_token=model_args.use_auth_token,
+            trust_remote_code=True,
+            torch_dtype=compute_dtype
+        )
+    except Exception as e:
+        print(f"Failed to load with AutoModel, trying pipeline approach: {e}")
+        # Alternative: Load via pipeline and extract model
+        pipe = pipeline(
+            model=model_args.model_name_or_path,
+            task="image-text-to-text",
+            device_map="auto",
+            model_kwargs={
+                "quantization_config": bnb_config,
+                "torch_dtype": compute_dtype,
+                "trust_remote_code": True
+            }
+        )
+        model = pipe.model
 
     # Load processor
     processor = AutoProcessor.from_pretrained(
@@ -250,8 +284,33 @@ def setup_model_and_tokenizer(model_args, lora_args):
     # Prepare model for k-bit training
     model = prepare_model_for_kbit_training(model)
 
-    # LoRA configuration
-    target_modules = lora_args.target_modules.split(',')
+    # LoRA configuration - adjust target modules for Aya Vision architecture
+    # Common modules in vision-language models
+    target_modules = [
+        "q_proj", "v_proj", "k_proj", "o_proj",
+        "gate_proj", "up_proj", "down_proj",
+        "fc1", "fc2",  # For vision encoder
+        "lm_head"  # Language model head
+    ]
+
+    # Find actual linear modules in the model
+    linear_modules = set()
+    for name, module in model.named_modules():
+        if isinstance(module, torch.nn.Linear):
+            # Extract the actual module name (last part after .)
+            module_name = name.split('.')[-1]
+            linear_modules.add(module_name)
+
+    print(f"Found linear modules: {linear_modules}")
+
+    # Use intersection of target modules and actual modules
+    target_modules = list(set(target_modules) & linear_modules)
+    if not target_modules:
+        # Fallback to all linear modules if no intersection
+        target_modules = list(linear_modules)
+
+    print(f"Using target modules for LoRA: {target_modules}")
+
     lora_config = LoraConfig(
         r=lora_args.lora_r,
         lora_alpha=lora_args.lora_alpha,
@@ -259,6 +318,7 @@ def setup_model_and_tokenizer(model_args, lora_args):
         lora_dropout=lora_args.lora_dropout,
         bias="none",
         task_type=TaskType.FEATURE_EXTRACTION,
+        modules_to_save=["lm_head"],  # Save the language model head
     )
 
     # Get PEFT model
