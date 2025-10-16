@@ -82,12 +82,23 @@ def tokenize_text(text, lang_code):
 def generate_caption(image, news_content, language):
     """Generate caption using Llama-3.2-11B-Vision"""
 
-    prompt = f"""Given this image and its news article, write a short caption for the image in {language_names[language]}. Try to identify people names, locations and organisations in the image linking it to the news article and include them in the image caption.
+    # Match the Aya prompt style for consistency
+    prompt = f"""You are writing a caption for a newspaper image.
 
-News Article:
-{news_content[:700]}
+Given the image and this news article excerpt:
+{news_content[:1200]}
 
-Write only the caption in {language_names[language]}, nothing else."""
+Task: Write a concise, informative caption for this image in {language_names[language]}.
+
+Guidelines:
+- Write in {language_names[language]} language only
+- Keep it brief (10-12 words)
+- Identify and include: people's names, locations, and organizations visible in the image
+- Connect what you see in the image to the news context
+- Use journalistic style (factual, clear, objective)
+- Focus on the main subject of the image
+
+Caption in {language_names[language]}:"""
 
     messages = [
         {"role": "user", "content": [
@@ -116,7 +127,11 @@ Write only the caption in {language_names[language]}, nothing else."""
         parts = generated_text.split(language_names[language])
         caption = parts[-1].strip().lstrip(':').strip()
     else:
+        # Find the caption after the prompt
         caption = generated_text.split(prompt)[-1].strip()
+
+    # Clean up any artifacts
+    caption = caption.replace('</s>', '').replace('<s>', '').strip()
 
     return caption
 
@@ -152,6 +167,7 @@ def evaluate_language(lang_code, dataset_name="tharindu/MUNIChus", num_samples=N
             predictions.append(generated_caption)
             references.append([example['caption']])
 
+            # Print sample outputs
             if i < 3:
                 print(f"\nSample {i + 1}:")
                 print(f"Generated: {generated_caption}")
