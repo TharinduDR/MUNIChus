@@ -103,18 +103,26 @@ def translate_caption(text, target_lang_code):
     if target_lang_code == "en":
         return text  # No translation needed
 
-    # Set source and target languages
+    # Set source language
     nllb_tokenizer.src_lang = nllb_lang_codes["en"]
     target_nllb_code = nllb_lang_codes[target_lang_code]
 
     # Tokenize
     inputs = nllb_tokenizer(text, return_tensors="pt", padding=True).to(nllb_model.device)
 
+    # Get the correct token ID for the target language
+    # Method 1: Using convert_tokens_to_ids
+    forced_bos_token_id = nllb_tokenizer.convert_tokens_to_ids(target_nllb_code)
+
+    # Alternative Method 2: If the above doesn't work, use lang_code_to_token
+    # forced_bos_token_id = nllb_tokenizer.lang_code_to_token(target_nllb_code)
+    # then convert to id: nllb_tokenizer.convert_tokens_to_ids(forced_bos_token_id)
+
     # Translate
     with torch.no_grad():
         translated_tokens = nllb_model.generate(
             **inputs,
-            forced_bos_token_id=nllb_tokenizer.lang_code_to_id[target_nllb_code],
+            forced_bos_token_id=forced_bos_token_id,
             max_new_tokens=100
         )
 
