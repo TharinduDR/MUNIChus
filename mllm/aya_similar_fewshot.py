@@ -26,13 +26,14 @@ from tqdm import tqdm
 
 
 class SimilarityFewShotSelector:
-    def __init__(self, cache_dir="./embedding_cache", device=None):
+    def __init__(self, cache_dir="./embedding_cache", device=None, load_model=True):
         """
         Initialize the similarity-based few-shot selector
 
         Args:
             cache_dir: Directory to cache embeddings to avoid recomputation
             device: Device to use for model ('cuda', 'cpu', or None for auto)
+            load_model: Whether to load the embedding model (False if only using cached embeddings)
         """
         self.cache_dir = cache_dir
         os.makedirs(cache_dir, exist_ok=True)
@@ -44,15 +45,20 @@ class SimilarityFewShotSelector:
         else:
             self.device = torch.device(device)
 
-        # Load model and processor
-        print(f"Loading Nomic Vision model on {self.device}...")
-        self.processor = AutoImageProcessor.from_pretrained("nomic-ai/nomic-embed-vision-v1.5")
-        self.vision_model = AutoModel.from_pretrained(
-            "nomic-ai/nomic-embed-vision-v1.5",
-            trust_remote_code=True
-        ).to(self.device)
-        self.vision_model.eval()  # Set to evaluation mode
-        print("✓ Nomic Vision model loaded successfully")
+        # Optionally load model and processor
+        if load_model:
+            print(f"Loading Nomic Vision model on {self.device}...")
+            self.processor = AutoImageProcessor.from_pretrained("nomic-ai/nomic-embed-vision-v1.5")
+            self.vision_model = AutoModel.from_pretrained(
+                "nomic-ai/nomic-embed-vision-v1.5",
+                trust_remote_code=True
+            ).to(self.device)
+            self.vision_model.eval()  # Set to evaluation mode
+            print("✓ Nomic Vision model loaded successfully")
+        else:
+            print("Skipping model loading - will use cached embeddings only")
+            self.processor = None
+            self.vision_model = None
 
     def get_image_embedding(self, image):
         """
@@ -678,11 +684,11 @@ if __name__ == "__main__":
     print("Using Nomic Vision embeddings for similarity matching")
     print("=" * 80)
 
-    # Initialize similarity selector (will cache embeddings)
-    # Use 'cpu' if you're running out of GPU memory with both models
+    # Initialize similarity selector WITHOUT loading the model (use cached embeddings only)
     similarity_selector = SimilarityFewShotSelector(
         cache_dir="./embedding_cache",
-        device='cpu'  # Changed to 'cpu' to free up GPU for Aya model
+        device='cpu',
+        load_model=False  # Don't load model - we only need cached embeddings
     )
 
     # Load pre-computed embeddings (train + test) from cache
