@@ -11,8 +11,239 @@ import time
 import sys
 import numpy as np
 
-# Import similarity selector
+
+"""
+Similarity-based few-shot selection using Nomic Vision Embeddings
+This module can be imported into any of the evaluation scripts
+"""
+
+from nomic import embed
+import numpy as np
+from PIL import Image
+import io
+import pickle
+import os
+from tqdm import tqdm
+
+
+class SimilarityFewShotSelector:
+    def __init__(self, cache_dir="./embedding_cache"):
+        """
+        Initialize the similarity-based few-shot selector
+
+        Args:
+            cache_dir: Directory to cache embeddings to avoid recomputation
+        """
+        self.cache_dir = cache_dir
+        os.makedirs(cache_dir, exist_ok=True)
+        self.train_embeddings_cache = {}
+
+    def save_pil_to_temp(self, pil_image, temp_path="temp_image.jpg"):
+        """Save PIL image temporarily for Nomic API"""
+        pil_image.save(temp_path, format="JPEG")
+        return temp_path
+
+    def get_image_embedding(self, image, model='nomic-embed-vision-v1.5'):
+        """
+        Get embedding for a single PIL image
+
+        Args:
+            image: PIL Image object
+            model: Nomic model name
+
+        Returns:
+            numpy array of shape (768,) containing the embedding
+        """
+        # Save PIL image temporarily
+        temp_path = self.save_pil_to_temp(image)
+
+        try:
+            # Get embedding from Nomic
+            output = embed.image(
+                images=[temp_path],
+                model=model
+            )
+
+            embedding = np.array(output['embeddings'][0])
+            return embedding
+
+        finally:
+            # Clean up temp file
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
+    def compute_train_embeddings(self, train_dataset, lang_code, force_recompute=False):
+        """
+        Compute and cache embeddings for all training images
+
+        Args:
+            train_dataset: HuggingFace dataset object (train split)
+            lang_code: Language code (e.g., 'en', 'ja')
+            force_recompute: If True, recompute even if cache exists
+
+        Returns:
+            numpy array of shape (num_train_examples, 768)
+        """
+        cache_path = os.path.join(self.cache_dir, f"train_embeddings_{lang_code}.pkl")
+
+        # Check if cached embeddings exist
+        if not force_recompute and os.path.exists(cache_path):
+            print(f"Loading cached embeddings for {lang_code} from {cache_path}")
+            with open(cache_path, 'rb') as f:
+                embeddings = pickle.load(f)
+            self.train_embeddings_cache[lang_code] = embeddings
+            return embeddings
+
+        print(f"Computing embeddings for {len(train_dataset)} training images ({lang_code})...")
+        print("This may take a while but will be cached for future use.")
+
+        embeddings_list = []
+
+        # Process in batches to show progress
+        batch_size = 10
+        for i in tqdm(range(0, len(train_dataset), batch_size), desc=f"Embedding {lang_code}"):
+            batch_end = min(i + batch_size, len(train_dataset))
+            batch_paths = []
+
+            # Save batch images temporarily
+            for j in range(i, batch_end):
+                temp_path = f"temp_batch_{j}.jpg"
+                train_dataset[j]['image'].save(temp_path, format="JPEG")
+                batch_paths.append(temp_path)
+
+            try:
+                # Get embeddings for batch
+                output = embed.image(
+                    images=batch_paths,
+                    model='nomic-embed-vision-v1.5'
+                )
+
+                batch_embeddings = output['embeddings']
+                embeddings_list.extend(batch_embeddings)
+
+            finally:
+                # Clean up batch temp files
+                for path in batch_paths:
+                    if os.path.exists(path):
+                        os.remove(path)
+
+        embeddings = np.array(embeddings_list)
+
+        # Cache the embeddings
+        with open(cache_path, 'wb') as f:
+            pickle.dump(embeddings, f)
+        print(f"Cached embeddings saved to {cache_path}")
+
+        self.train_embeddings_cache[lang_code] = embeddings
+        return embeddings
+
+    def find_similar_examples(self, test_image, train_dataset, lang_code,
+                              num_examples=3, exclude_indices=None):
+        """
+        Find the most similar training examples for a test image
+
+        Args:
+            test_image: PIL Image (test image)
+            train_dataset: HuggingFace dataset object (train split)
+            lang_code: Language code
+            num_examples: Number of similar examples to return
+            exclude_indices: List of indices to exclude from selection
+
+        Returns:
+            List of dicts with keys: 'image', 'content', 'caption', 'similarity'
+        """
+        # Get or compute train embeddings
+        if lang_code not in self.train_embeddings_cache:
+            train_embeddings = self.compute_train_embeddings(train_dataset, lang_code)
+        else:
+            train_embeddings = self.train_embeddings_cache[lang_code]
+
+        # Get embedding for test image
+        test_embedding = self.get_image_embedding(test_image)
+
+        # Compute cosine similarities
+        # Normalize embeddings
+        test_embedding_norm = test_embedding / np.linalg.norm(test_embedding)
+        train_embeddings_norm = train_embeddings / np.linalg.norm(train_embeddings, axis=1, keepdims=True)
+
+        # Cosine similarity
+        similarities = np.dot(train_embeddings_norm, test_embedding_norm)
+
+        # Get indices sorted by similarity (highest first)
+        sorted_indices = np.argsort(similarities)[::-1]
+
+        # Filter out excluded indices
+        if exclude_indices is not None:
+            exclude_set = set(exclude_indices)
+            sorted_indices = [idx for idx in sorted_indices if idx not in exclude_set]
+
+        # Select top k
+        selected_indices = sorted_indices[:num_examples]
+
+        # Prepare examples
+        examples = []
+        for idx in selected_indices:
+            try:
+                example = train_dataset[int(idx)]
+                examples.append({
+                    'image': example['image'],
+                    'content': example['content'][:800],
+                    'caption': example['caption'],
+                    'similarity': float(similarities[idx]),
+                    'index': int(idx)
+                })
+            except Exception as e:
+                print(f"Error loading example {idx}: {e}")
+                continue
+
+        return examples
+
+
+def get_similarity_based_examples(test_image, train_dataset, lang_code,
+                                  num_examples=3, selector=None):
+    """
+    Convenience function to get similarity-based few-shot examples
+
+    Args:
+        test_image: PIL Image (test image)
+        train_dataset: HuggingFace dataset object (train split)
+        lang_code: Language code
+        num_examples: Number of examples to retrieve
+        selector: SimilarityFewShotSelector instance (optional, will create if None)
+
+    Returns:
+        List of example dicts
+    """
+    if selector is None:
+        selector = SimilarityFewShotSelector()
+
+    return selector.find_similar_examples(
+        test_image,
+        train_dataset,
+        lang_code,
+        num_examples=num_examples
+    )
+
+
+# Example usage for integration into existing scripts:
+"""
+# At the top of your evaluation script:
 from similarity_fewshot import SimilarityFewShotSelector
+
+# In your evaluation function, before the test loop:
+similarity_selector = SimilarityFewShotSelector(cache_dir="./embedding_cache")
+
+# Pre-compute embeddings for this language (done once)
+similarity_selector.compute_train_embeddings(train_data, lang_code)
+
+# In your test loop, replace get_random_few_shot_examples with:
+few_shot_examples = similarity_selector.find_similar_examples(
+    test_image=example['image'],
+    train_dataset=train_data,
+    lang_code=lang_code,
+    num_examples=num_few_shot
+)
+"""
 
 # For Japanese/Chinese tokenization
 try:
