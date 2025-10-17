@@ -6,7 +6,7 @@
 export HF_HOME=/mnt/nfs/homes/ranasint/hf_home
 huggingface-cli login --token
 
-python -m train.aya_qlora_finetune.py \
+python -m train.aya_qlora_finetune \
     --output_dir ./aya-vision-qlora \
     --num_train_epochs 3 \
     --per_device_train_batch_size 1 \
