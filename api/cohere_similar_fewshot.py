@@ -16,20 +16,6 @@ import numpy as np
 Similarity-based few-shot selection using Nomic Vision Embeddings
 This module can be imported into any of the evaluation scripts
 """
-
-from nomic import embed
-import numpy as np
-from PIL import Image
-import io
-import pickle
-import os
-from tqdm import tqdm
-
-"""
-Similarity-based few-shot selection using Nomic Vision Embeddings via HuggingFace
-This module can be imported into any of the evaluation scripts
-"""
-
 import torch
 import torch.nn.functional as F
 from transformers import AutoModel, AutoImageProcessor
