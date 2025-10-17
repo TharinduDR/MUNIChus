@@ -25,54 +25,99 @@ import pickle
 import os
 from tqdm import tqdm
 
+"""
+Similarity-based few-shot selection using Nomic Vision Embeddings via HuggingFace
+This module can be imported into any of the evaluation scripts
+"""
+
+import torch
+import torch.nn.functional as F
+from transformers import AutoModel, AutoImageProcessor
+import numpy as np
+from PIL import Image
+import pickle
+import os
+from tqdm import tqdm
+
 
 class SimilarityFewShotSelector:
-    def __init__(self, cache_dir="./embedding_cache"):
+    def __init__(self, cache_dir="./embedding_cache", device=None):
         """
         Initialize the similarity-based few-shot selector
 
         Args:
             cache_dir: Directory to cache embeddings to avoid recomputation
+            device: Device to use for model ('cuda', 'cpu', or None for auto)
         """
         self.cache_dir = cache_dir
         os.makedirs(cache_dir, exist_ok=True)
         self.train_embeddings_cache = {}
 
-    def save_pil_to_temp(self, pil_image, temp_path="temp_image.jpg"):
-        """Save PIL image temporarily for Nomic API"""
-        pil_image.save(temp_path, format="JPEG")
-        return temp_path
+        # Set device
+        if device is None:
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        else:
+            self.device = torch.device(device)
 
-    def get_image_embedding(self, image, model='nomic-embed-vision-v1.5'):
+        # Load model and processor
+        print(f"Loading Nomic Vision model on {self.device}...")
+        self.processor = AutoImageProcessor.from_pretrained("nomic-ai/nomic-embed-vision-v1.5")
+        self.vision_model = AutoModel.from_pretrained(
+            "nomic-ai/nomic-embed-vision-v1.5",
+            trust_remote_code=True
+        ).to(self.device)
+        self.vision_model.eval()  # Set to evaluation mode
+        print("✓ Nomic Vision model loaded successfully")
+
+    def get_image_embedding(self, image):
         """
         Get embedding for a single PIL image
 
         Args:
             image: PIL Image object
-            model: Nomic model name
 
         Returns:
-            numpy array of shape (768,) containing the embedding
+            numpy array of shape (768,) containing the normalized embedding
         """
-        # Save PIL image temporarily
-        temp_path = self.save_pil_to_temp(image)
+        # Process image
+        inputs = self.processor(image, return_tensors="pt")
 
-        try:
-            # Get embedding from Nomic
-            output = embed.image(
-                images=[temp_path],
-                model=model
-            )
+        # Move inputs to device
+        inputs = {k: v.to(self.device) for k, v in inputs.items()}
 
-            embedding = np.array(output['embeddings'][0])
-            return embedding
+        # Get embeddings
+        with torch.no_grad():
+            img_emb = self.vision_model(**inputs).last_hidden_state
+            img_embedding = F.normalize(img_emb[:, 0], p=2, dim=1)
 
-        finally:
-            # Clean up temp file
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
+        # Convert to numpy and return
+        return img_embedding.cpu().numpy()[0]
 
-    def compute_train_embeddings(self, train_dataset, lang_code, force_recompute=False):
+    def get_batch_embeddings(self, images):
+        """
+        Get embeddings for a batch of PIL images
+
+        Args:
+            images: List of PIL Image objects
+
+        Returns:
+            numpy array of shape (batch_size, 768)
+        """
+        # Process batch of images
+        inputs = self.processor(images, return_tensors="pt")
+
+        # Move inputs to device
+        inputs = {k: v.to(self.device) for k, v in inputs.items()}
+
+        # Get embeddings
+        with torch.no_grad():
+            img_emb = self.vision_model(**inputs).last_hidden_state
+            img_embeddings = F.normalize(img_emb[:, 0], p=2, dim=1)
+
+        # Convert to numpy and return
+        return img_embeddings.cpu().numpy()
+
+    def compute_train_embeddings(self, train_dataset, lang_code, force_recompute=False, batch_size=32):
         """
         Compute and cache embeddings for all training images
 
@@ -80,6 +125,7 @@ class SimilarityFewShotSelector:
             train_dataset: HuggingFace dataset object (train split)
             lang_code: Language code (e.g., 'en', 'ja')
             force_recompute: If True, recompute even if cache exists
+            batch_size: Batch size for processing images
 
         Returns:
             numpy array of shape (num_train_examples, 768)
@@ -92,6 +138,7 @@ class SimilarityFewShotSelector:
             with open(cache_path, 'rb') as f:
                 embeddings = pickle.load(f)
             self.train_embeddings_cache[lang_code] = embeddings
+            print(f"✓ Loaded {embeddings.shape[0]} cached embeddings")
             return embeddings
 
         print(f"Computing embeddings for {len(train_dataset)} training images ({lang_code})...")
@@ -99,40 +146,41 @@ class SimilarityFewShotSelector:
 
         embeddings_list = []
 
-        # Process in batches to show progress
-        batch_size = 10
-        for i in tqdm(range(0, len(train_dataset), batch_size), desc=f"Embedding {lang_code}"):
+        # Process in batches
+        num_batches = (len(train_dataset) + batch_size - 1) // batch_size
+
+        for i in tqdm(range(0, len(train_dataset), batch_size),
+                      desc=f"Embedding {lang_code}",
+                      total=num_batches):
             batch_end = min(i + batch_size, len(train_dataset))
-            batch_paths = []
 
-            # Save batch images temporarily
-            for j in range(i, batch_end):
-                temp_path = f"temp_batch_{j}.jpg"
-                train_dataset[j]['image'].save(temp_path, format="JPEG")
-                batch_paths.append(temp_path)
+            # Get batch of images
+            batch_images = [train_dataset[j]['image'] for j in range(i, batch_end)]
 
+            # Get embeddings for batch
             try:
-                # Get embeddings for batch
-                output = embed.image(
-                    images=batch_paths,
-                    model='nomic-embed-vision-v1.5'
-                )
+                batch_embeddings = self.get_batch_embeddings(batch_images)
+                embeddings_list.append(batch_embeddings)
+            except Exception as e:
+                print(f"Error processing batch {i // batch_size}: {e}")
+                # Fallback to processing one by one
+                for img in batch_images:
+                    try:
+                        emb = self.get_image_embedding(img)
+                        embeddings_list.append(emb.reshape(1, -1))
+                    except Exception as e2:
+                        print(f"Error processing single image: {e2}")
+                        # Add zero embedding as placeholder
+                        embeddings_list.append(np.zeros((1, 768)))
 
-                batch_embeddings = output['embeddings']
-                embeddings_list.extend(batch_embeddings)
-
-            finally:
-                # Clean up batch temp files
-                for path in batch_paths:
-                    if os.path.exists(path):
-                        os.remove(path)
-
-        embeddings = np.array(embeddings_list)
+        # Concatenate all embeddings
+        embeddings = np.vstack(embeddings_list)
 
         # Cache the embeddings
+        print(f"Saving embeddings to cache...")
         with open(cache_path, 'wb') as f:
             pickle.dump(embeddings, f)
-        print(f"Cached embeddings saved to {cache_path}")
+        print(f"✓ Cached {embeddings.shape[0]} embeddings to {cache_path}")
 
         self.train_embeddings_cache[lang_code] = embeddings
         return embeddings
@@ -150,7 +198,7 @@ class SimilarityFewShotSelector:
             exclude_indices: List of indices to exclude from selection
 
         Returns:
-            List of dicts with keys: 'image', 'content', 'caption', 'similarity'
+            List of dicts with keys: 'image', 'content', 'caption', 'similarity', 'index'
         """
         # Get or compute train embeddings
         if lang_code not in self.train_embeddings_cache:
@@ -161,13 +209,8 @@ class SimilarityFewShotSelector:
         # Get embedding for test image
         test_embedding = self.get_image_embedding(test_image)
 
-        # Compute cosine similarities
-        # Normalize embeddings
-        test_embedding_norm = test_embedding / np.linalg.norm(test_embedding)
-        train_embeddings_norm = train_embeddings / np.linalg.norm(train_embeddings, axis=1, keepdims=True)
-
-        # Cosine similarity
-        similarities = np.dot(train_embeddings_norm, test_embedding_norm)
+        # Compute cosine similarities (embeddings are already normalized)
+        similarities = np.dot(train_embeddings, test_embedding)
 
         # Get indices sorted by similarity (highest first)
         sorted_indices = np.argsort(similarities)[::-1]
@@ -230,11 +273,15 @@ def get_similarity_based_examples(test_image, train_dataset, lang_code,
 # At the top of your evaluation script:
 from similarity_fewshot import SimilarityFewShotSelector
 
-# In your evaluation function, before the test loop:
-similarity_selector = SimilarityFewShotSelector(cache_dir="./embedding_cache")
+# Initialize once (loads model)
+similarity_selector = SimilarityFewShotSelector(
+    cache_dir="./embedding_cache",
+    device='cuda'  # or 'cpu'
+)
 
-# Pre-compute embeddings for this language (done once)
-similarity_selector.compute_train_embeddings(train_data, lang_code)
+# In your evaluation function, before the test loop:
+# Pre-compute embeddings for this language (done once, then cached)
+similarity_selector.compute_train_embeddings(train_data, lang_code, batch_size=32)
 
 # In your test loop, replace get_random_few_shot_examples with:
 few_shot_examples = similarity_selector.find_similar_examples(
@@ -243,6 +290,13 @@ few_shot_examples = similarity_selector.find_similar_examples(
     lang_code=lang_code,
     num_examples=num_few_shot
 )
+
+# The returned examples will have:
+# - 'image': PIL Image
+# - 'content': truncated news content
+# - 'caption': reference caption
+# - 'similarity': cosine similarity score (0-1)
+# - 'index': index in training set
 """
 
 # For Japanese/Chinese tokenization
