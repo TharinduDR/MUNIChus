@@ -92,6 +92,10 @@ class SimilarityFewShotSelector:
         Returns:
             numpy array of shape (batch_size, 768)
         """
+        # Check if model is available
+        if not hasattr(self, 'vision_model') or self.vision_model is None:
+            raise RuntimeError("Vision model has been deleted. Cannot compute new embeddings.")
+
         # Process batch of images
         inputs = self.processor(images, return_tensors="pt")
 
@@ -105,6 +109,28 @@ class SimilarityFewShotSelector:
 
         # Convert to numpy and return
         return img_embeddings.cpu().numpy()
+
+    def load_test_embeddings(self, lang_code):
+        """
+        Load pre-computed test embeddings from cache
+
+        Args:
+            lang_code: Language code (e.g., 'en', 'ja')
+
+        Returns:
+            numpy array of shape (num_test_examples, 768) or None if not found
+        """
+        cache_path = os.path.join(self.cache_dir, f"test_embeddings_{lang_code}.pkl")
+
+        if os.path.exists(cache_path):
+            print(f"Loading cached test embeddings for {lang_code} from {cache_path}")
+            with open(cache_path, 'rb') as f:
+                embeddings = pickle.load(f)
+            print(f"✓ Loaded {embeddings.shape[0]} cached test embeddings")
+            return embeddings
+        else:
+            print(f"⚠️  No cached test embeddings found for {lang_code} at {cache_path}")
+            return None
 
     def compute_train_embeddings(self, train_dataset, lang_code, force_recompute=False, batch_size=32):
         """
@@ -196,6 +222,15 @@ class SimilarityFewShotSelector:
             train_embeddings = self.train_embeddings_cache[lang_code]
 
         # Get embedding for test image
+        # Check if model is still available for computing test embeddings
+        if not hasattr(self, 'vision_model') or self.vision_model is None:
+            # If model is deleted, we can't compute test embeddings
+            # This means embeddings must be pre-computed during training phase
+            raise RuntimeError(
+                "Vision model has been deleted. All test embeddings must be computed "
+                "before deleting the model, or keep the model in memory."
+            )
+
         test_embedding = self.get_image_embedding(test_image)
 
         # Compute cosine similarities (embeddings are already normalized)
@@ -650,54 +685,27 @@ if __name__ == "__main__":
         device='cpu'  # Changed to 'cpu' to free up GPU for Aya model
     )
 
-    # Step 1: Pre-compute ALL embeddings (train + test) before deleting model
-    print("Step 1: Pre-computing embeddings for all languages...")
+    # Load pre-computed embeddings (train + test) from cache
+    print("Loading pre-computed embeddings from cache...")
     test_embeddings_cache = {}
 
     for lang in languages:
         train_data = load_train_dataset(lang)
         if train_data:
-            # Compute train embeddings
-            similarity_selector.compute_train_embeddings(train_data, lang, batch_size=16)
+            # Load train embeddings from cache
+            similarity_selector.compute_train_embeddings(train_data, lang)
 
-            # Compute test embeddings
-            try:
-                dataset = load_dataset("tharindu/MUNIChus", lang)
-                test_data = dataset['test']
-                if NUM_SAMPLES:
-                    test_data = test_data.select(range(min(NUM_SAMPLES, len(test_data))))
-
-                print(f"Computing test embeddings for {lang}...")
-                test_images = [test_data[i]['image'] for i in range(len(test_data))]
-                test_embeddings = []
-
-                # Compute in batches
-                batch_size = 16
-                for i in tqdm(range(0, len(test_images), batch_size), desc=f"Test embeddings {lang}"):
-                    batch = test_images[i:i + batch_size]
-                    batch_emb = similarity_selector.get_batch_embeddings(batch)
-                    test_embeddings.append(batch_emb)
-
-                test_embeddings_cache[lang] = np.vstack(test_embeddings)
-                print(f"✓ Cached {len(test_embeddings_cache[lang])} test embeddings for {lang}")
-
-            except Exception as e:
-                print(f"Error computing test embeddings for {lang}: {e}")
-
-    # Delete the embedding model to free memory
-    print("\n✓ All embeddings cached!")
-    print("Freeing embedding model from memory...")
-    del similarity_selector.vision_model
-    del similarity_selector.processor
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    print("✓ Memory freed!\n")
+            # Load test embeddings from cache
+            test_embeddings = similarity_selector.load_test_embeddings(lang)
+            if test_embeddings is not None:
+                test_embeddings_cache[lang] = test_embeddings
+            else:
+                print(f"⚠️  WARNING: No test embeddings found for {lang}. Run precompute_embeddings.py first!")
 
     # Store test embeddings in the selector for later use
     similarity_selector.test_embeddings_cache = test_embeddings_cache
 
-    # Now run the main evaluation (using cached embeddings)
-    print("Step 2: Running caption generation with cached embeddings...")
+    print("\n✓ All embeddings loaded from cache!\n")
     for lang in languages:
         try:
             results, preds, refs = evaluate_language_similarity_fewshot(
