@@ -11,9 +11,10 @@ import base64
 import numpy as np
 
 """
-Similarity-based few-shot selection using Nomic Vision Embeddings
+Similarity-based few-shot selection using Nomic Vision Embeddings via HuggingFace
 This module can be imported into any of the evaluation scripts
 """
+
 import torch
 import torch.nn.functional as F
 from transformers import AutoModel, AutoImageProcessor
@@ -63,6 +64,10 @@ class SimilarityFewShotSelector:
         Returns:
             numpy array of shape (768,) containing the normalized embedding
         """
+        # Check if model is available
+        if not hasattr(self, 'vision_model') or self.vision_model is None:
+            raise RuntimeError("Vision model has been deleted. Cannot compute new embeddings.")
+
         # Process image
         inputs = self.processor(image, return_tensors="pt")
 
@@ -287,6 +292,7 @@ few_shot_examples = similarity_selector.find_similar_examples(
 try:
     import jieba
     import MeCab
+
     CJK_TOKENIZATION_AVAILABLE = True
 except ImportError:
     print("Warning: jieba or MeCab not installed. Install with:")
@@ -445,8 +451,8 @@ def generate_caption_aya_similarity_fewshot(image, news_content, language, few_s
 
 
 def evaluate_language_similarity_fewshot(lang_code, dataset_name="tharindu/MUNIChus",
-                                        num_samples=None, num_few_shot=3,
-                                        similarity_selector=None):
+                                         num_samples=None, num_few_shot=3,
+                                         similarity_selector=None):
     """Evaluate Aya Vision model on a specific language with similarity-based few-shot learning"""
 
     print(f"\n{'=' * 80}")
@@ -485,13 +491,42 @@ def evaluate_language_similarity_fewshot(lang_code, dataset_name="tharindu/MUNIC
     # Generate captions with similarity-based few-shot examples
     for i, example in enumerate(tqdm(test_data, desc=f"Generating {lang_code} (similarity-based)")):
         try:
-            # Find similar examples from training set
-            few_shot_examples = similarity_selector.find_similar_examples(
-                test_image=example['image'],
-                train_dataset=train_data,
-                lang_code=lang_code,
-                num_examples=num_few_shot
-            )
+            # Use pre-computed test embedding instead of computing on-the-fly
+            if hasattr(similarity_selector,
+                       'test_embeddings_cache') and lang_code in similarity_selector.test_embeddings_cache:
+                test_embedding = similarity_selector.test_embeddings_cache[lang_code][i]
+
+                # Get train embeddings
+                train_embeddings = similarity_selector.train_embeddings_cache[lang_code]
+
+                # Compute similarities
+                similarities = np.dot(train_embeddings, test_embedding)
+                sorted_indices = np.argsort(similarities)[::-1]
+                selected_indices = sorted_indices[:num_few_shot]
+
+                # Build few-shot examples
+                few_shot_examples = []
+                for idx in selected_indices:
+                    try:
+                        train_example = train_data[int(idx)]
+                        few_shot_examples.append({
+                            'image': train_example['image'],
+                            'content': train_example['content'][:800],
+                            'caption': train_example['caption'],
+                            'similarity': float(similarities[idx]),
+                            'index': int(idx)
+                        })
+                    except Exception as e:
+                        print(f"Error loading example {idx}: {e}")
+                        continue
+            else:
+                # Fallback to using the selector (requires model)
+                few_shot_examples = similarity_selector.find_similar_examples(
+                    test_image=example['image'],
+                    train_dataset=train_data,
+                    lang_code=lang_code,
+                    num_examples=num_few_shot
+                )
 
             if len(few_shot_examples) < num_few_shot:
                 print(f"Warning: Only {len(few_shot_examples)} similar examples found")
@@ -615,6 +650,54 @@ if __name__ == "__main__":
         device='cpu'  # Changed to 'cpu' to free up GPU for Aya model
     )
 
+    # Step 1: Pre-compute ALL embeddings (train + test) before deleting model
+    print("Step 1: Pre-computing embeddings for all languages...")
+    test_embeddings_cache = {}
+
+    for lang in languages:
+        train_data = load_train_dataset(lang)
+        if train_data:
+            # Compute train embeddings
+            similarity_selector.compute_train_embeddings(train_data, lang, batch_size=16)
+
+            # Compute test embeddings
+            try:
+                dataset = load_dataset("tharindu/MUNIChus", lang)
+                test_data = dataset['test']
+                if NUM_SAMPLES:
+                    test_data = test_data.select(range(min(NUM_SAMPLES, len(test_data))))
+
+                print(f"Computing test embeddings for {lang}...")
+                test_images = [test_data[i]['image'] for i in range(len(test_data))]
+                test_embeddings = []
+
+                # Compute in batches
+                batch_size = 16
+                for i in tqdm(range(0, len(test_images), batch_size), desc=f"Test embeddings {lang}"):
+                    batch = test_images[i:i + batch_size]
+                    batch_emb = similarity_selector.get_batch_embeddings(batch)
+                    test_embeddings.append(batch_emb)
+
+                test_embeddings_cache[lang] = np.vstack(test_embeddings)
+                print(f"✓ Cached {len(test_embeddings_cache[lang])} test embeddings for {lang}")
+
+            except Exception as e:
+                print(f"Error computing test embeddings for {lang}: {e}")
+
+    # Delete the embedding model to free memory
+    print("\n✓ All embeddings cached!")
+    print("Freeing embedding model from memory...")
+    del similarity_selector.vision_model
+    del similarity_selector.processor
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    print("✓ Memory freed!\n")
+
+    # Store test embeddings in the selector for later use
+    similarity_selector.test_embeddings_cache = test_embeddings_cache
+
+    # Now run the main evaluation (using cached embeddings)
+    print("Step 2: Running caption generation with cached embeddings...")
     for lang in languages:
         try:
             results, preds, refs = evaluate_language_similarity_fewshot(
@@ -633,6 +716,7 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"✗ Error evaluating {lang}: {e}")
             import traceback
+
             traceback.print_exc()
             continue
 
