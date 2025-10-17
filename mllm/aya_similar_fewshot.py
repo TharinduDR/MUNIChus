@@ -345,7 +345,7 @@ print("Loading Aya Vision 8B...")
 pipe = pipeline(
     model="CohereLabs/aya-vision-8b",
     task="image-text-to-text",
-    device_map="auto"
+    device=0
 )
 
 # Initialize metrics
