@@ -609,9 +609,10 @@ if __name__ == "__main__":
     print("=" * 80)
 
     # Initialize similarity selector (will cache embeddings)
+    # Use 'cpu' if you're running out of GPU memory with both models
     similarity_selector = SimilarityFewShotSelector(
         cache_dir="./embedding_cache",
-        device='cuda'  # or 'cpu'
+        device='cpu'  # Changed to 'cpu' to free up GPU for Aya model
     )
 
     for lang in languages:
