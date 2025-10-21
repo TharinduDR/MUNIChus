@@ -28,7 +28,7 @@ model = AutoModelForCausalLM.from_pretrained(
     device_map="cuda",
     trust_remote_code=True,
     torch_dtype="auto",
-    _attn_implementation='eager'  # Change to 'eager' if flash_attn not available
+    _attn_implementation='sdpa'  # Change to 'eager' if flash_attn not available
 )
 
 # For best performance, use num_crops=4 for multi-frame, num_crops=16 for single-frame
