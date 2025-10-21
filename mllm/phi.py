@@ -128,6 +128,7 @@ Caption in {language_names[language]}:"""
             "max_new_tokens": 100,
             "temperature": 0.0,
             "do_sample": False,
+            "use_cache": False,
         }
 
         # Generate
