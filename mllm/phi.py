@@ -35,7 +35,7 @@ model = AutoModelForCausalLM.from_pretrained(
 processor = AutoProcessor.from_pretrained(
     model_id,
     trust_remote_code=True,
-    num_crops=4
+    num_crops=16
 )
 
 # Initialize metrics
