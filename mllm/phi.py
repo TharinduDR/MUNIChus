@@ -1,5 +1,5 @@
 import torch
-from transformers import AutoModelForCausalLM, AutoProcessor
+from transformers import AutoModelForCausalLM, AutoProcessor, BitsAndBytesConfig
 from datasets import load_dataset
 from tqdm import tqdm
 import pandas as pd
@@ -18,24 +18,31 @@ except ImportError:
     print("  pip install jieba mecab-python3 unidic-lite")
     CJK_TOKENIZATION_AVAILABLE = False
 
-# Initialize model and processor
-print("Loading Phi-3.5-vision-instruct...")
+# Initialize model and processor with quantization
+print("Loading Phi-3.5-vision-instruct with 4-bit quantization...")
 model_id = "microsoft/Phi-3.5-vision-instruct"
 
-# Note: set _attn_implementation='eager' if you don't have flash_attn installed
+# Configure 4-bit quantization
+quantization_config = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_compute_dtype=torch.bfloat16,
+    bnb_4bit_quant_type="nf4",
+    bnb_4bit_use_double_quant=True,
+)
+
 model = AutoModelForCausalLM.from_pretrained(
     model_id,
-    device_map="cuda",
+    device_map="auto",  # Changed from "cuda" to "auto" for better memory management
     trust_remote_code=True,
-    torch_dtype="auto",
-    _attn_implementation='eager'  # Change to 'eager' if flash_attn not available
+    quantization_config=quantization_config,
+    _attn_implementation='eager'
 )
 
 # For best performance, use num_crops=4 for multi-frame, num_crops=16 for single-frame
 processor = AutoProcessor.from_pretrained(
     model_id,
     trust_remote_code=True,
-    num_crops=16
+    num_crops=4  # Changed from 16 to 4 for faster processing
 )
 
 # Initialize metrics
@@ -123,20 +130,20 @@ Caption in {language_names[language]}:"""
         # Process inputs - pass image as a list
         inputs = processor(prompt, [image], return_tensors="pt").to(model.device)
 
-        # Generation arguments
+        # Generation arguments - optimized for speed
         generation_args = {
-            "max_new_tokens": 100,
-            "temperature": 0.0,
+            "max_new_tokens": 50,  # Reduced from 100
             "do_sample": False,
-            "use_cache": False,
+            "use_cache": True,  # Changed to True for faster generation with quantization
         }
 
-        # Generate
-        generate_ids = model.generate(
-            **inputs,
-            eos_token_id=processor.tokenizer.eos_token_id,
-            **generation_args
-        )
+        # Generate with torch.no_grad() for memory efficiency
+        with torch.no_grad():
+            generate_ids = model.generate(
+                **inputs,
+                eos_token_id=processor.tokenizer.eos_token_id,
+                **generation_args
+            )
 
         # Remove input tokens
         generate_ids = generate_ids[:, inputs['input_ids'].shape[1]:]
@@ -278,21 +285,21 @@ results_df = pd.DataFrame(all_results)
 
 # Print summary
 print("\n" + "=" * 80)
-print("FINAL RESULTS SUMMARY - PHI-3.5-VISION-INSTRUCT")
+print("FINAL RESULTS SUMMARY - PHI-3.5-VISION-INSTRUCT (4-bit Quantized)")
 print("=" * 80)
 print(results_df.to_string(index=False))
 
 # Save results
-results_df.to_csv("phi35_vision_evaluation_results.csv", index=False)
-print("\n✓ Results saved to phi35_vision_evaluation_results.csv")
+results_df.to_csv("phi35_vision_4bit_evaluation_results.csv", index=False)
+print("\n✓ Results saved to phi35_vision_4bit_evaluation_results.csv")
 
 # Save detailed predictions
-with open("phi35_vision_predictions.json", "w", encoding="utf-8") as f:
+with open("phi35_vision_4bit_predictions.json", "w", encoding="utf-8") as f:
     json.dump({
         "predictions": all_predictions,
         "references": all_references
     }, f, ensure_ascii=False, indent=2)
-print("✓ Predictions saved to phi35_vision_predictions.json")
+print("✓ Predictions saved to phi35_vision_4bit_predictions.json")
 
 # Calculate averages
 print("\nAverage Scores Across All Languages:")
