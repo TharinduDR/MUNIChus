@@ -6,6 +6,6 @@
 export HF_HOME=/mnt/nfs/homes/ranasint/hf_home
 huggingface-cli login --token
 
-python -m baseline.blip_trans
+python -m baseline.paligemma
 
 
