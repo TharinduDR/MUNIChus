@@ -72,6 +72,21 @@ train_embeddings = encode_images_batch(train_images, batch_size=32, desc="Encodi
 print(f"\nTrain embeddings shape: {train_embeddings.shape}")
 print(f"Test embedding shape: {test_embedding.shape}")
 
+# Debug: Check embedding values
+print(f"\nDEBUG - Test embedding stats:")
+print(f"  Mean: {test_embedding.mean():.6f}")
+print(f"  Std: {test_embedding.std():.6f}")
+print(f"  Min: {test_embedding.min():.6f}")
+print(f"  Max: {test_embedding.max():.6f}")
+print(f"  Norm: {np.linalg.norm(test_embedding):.6f}")
+
+print(f"\nDEBUG - Train embeddings stats (first sample):")
+print(f"  Mean: {train_embeddings[0].mean():.6f}")
+print(f"  Std: {train_embeddings[0].std():.6f}")
+print(f"  Min: {train_embeddings[0].min():.6f}")
+print(f"  Max: {train_embeddings[0].max():.6f}")
+print(f"  Norm: {np.linalg.norm(train_embeddings[0]):.6f}")
+
 # Normalize embeddings with progress bar
 print("\nNormalizing embeddings...")
 with tqdm(total=2, desc="Normalizing", unit="step") as pbar:
@@ -80,6 +95,10 @@ with tqdm(total=2, desc="Normalizing", unit="step") as pbar:
     test_embedding_norm = test_embedding / np.linalg.norm(test_embedding, axis=1, keepdims=True)
     pbar.update(1)
 
+print(f"\nDEBUG - After normalization:")
+print(f"  Test embedding norm: {np.linalg.norm(test_embedding_norm):.6f}")
+print(f"  Train embedding[0] norm: {np.linalg.norm(train_embeddings_norm[0]):.6f}")
+
 # Compute cosine similarities ONLY for this one test image
 print("\nComputing similarities for selected test image...")
 with tqdm(total=1, desc="Computing similarities", unit="step") as pbar:
@@ -87,6 +106,12 @@ with tqdm(total=1, desc="Computing similarities", unit="step") as pbar:
     pbar.update(1)
 
 print(f"Similarities shape: {similarities.shape}")
+print(f"\nDEBUG - Similarity stats:")
+print(f"  Mean: {similarities.mean():.6f}")
+print(f"  Std: {similarities.std():.6f}")
+print(f"  Min: {similarities.min():.6f}")
+print(f"  Max: {similarities.max():.6f}")
+print(f"  First 10 similarities: {similarities[:10]}")
 
 # Get top-3 most similar images
 print("\nFinding top-3 most similar images...")
@@ -94,6 +119,9 @@ with tqdm(total=1, desc="Finding top-3", unit="step") as pbar:
     top3_indices = np.argsort(similarities)[-3:][::-1]
     top3_similarities = similarities[top3_indices]
     pbar.update(1)
+
+print(f"\nTop-3 indices: {top3_indices}")
+print(f"Top-3 similarities: {top3_similarities}")
 
 # Visualize
 print("\nCreating visualization...")
@@ -127,6 +155,4 @@ plt.suptitle('Test Image with Top-3 Most Similar Training Images', fontsize=14, 
 plt.tight_layout()
 plt.savefig('similar_images.png', dpi=300, bbox_inches='tight')
 print(f"\n✓ Visualization saved as 'similar_images.png'")
-print(f"\nTest image index: {test_idx}")
-print(f"Top-3 similarities: {top3_similarities}")
 plt.show()
