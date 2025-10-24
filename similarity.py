@@ -16,12 +16,12 @@ test_data = dataset['test']
 
 print(f"Train samples: {len(train_data)}, Test samples: {len(test_data)}")
 
-# Load vision encoder
+# Load vision encoder - USE FLOAT32 instead of FLOAT16
 print("Loading nomic-embed-vision-v1.5...")
 model = AutoModel.from_pretrained(
     "nomic-ai/nomic-embed-vision-v1.5",
     trust_remote_code=True,
-    torch_dtype=torch.float16
+    torch_dtype=torch.float32  # Changed from float16 to float32
 ).cuda()
 
 processor = AutoImageProcessor.from_pretrained(
@@ -44,7 +44,8 @@ def encode_images_batch(images, batch_size=32, desc="Encoding"):
         with torch.no_grad():
             batch_embeddings = model(**inputs).last_hidden_state.mean(dim=1)
 
-        embeddings.append(batch_embeddings.cpu().numpy())
+        # Convert to float32 before converting to numpy to avoid overflow
+        embeddings.append(batch_embeddings.float().cpu().numpy())
 
         # Update progress bar
         pbar.update(len(batch))
@@ -111,7 +112,6 @@ print(f"  Mean: {similarities.mean():.6f}")
 print(f"  Std: {similarities.std():.6f}")
 print(f"  Min: {similarities.min():.6f}")
 print(f"  Max: {similarities.max():.6f}")
-print(f"  First 10 similarities: {similarities[:10]}")
 
 # Get top-3 most similar images
 print("\nFinding top-3 most similar images...")
