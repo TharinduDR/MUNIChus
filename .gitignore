@@ -73,7 +73,9 @@ fabric.properties
 .ipynb_checkpoints/.idea
 .ipynb_checkpoints
 
+
 outputs
+
 runs
 temp
 temp*
@@ -88,3 +90,18 @@ site
 
 slurm*
 *.sh
+
+__pycache__/
+*.py[cod]
+
+
+# HPC / Slurm
+*.slurm
+*.out
+*.err
+
+# Trained / exported models
+best_model/
+**/best_model/
+
+logs
