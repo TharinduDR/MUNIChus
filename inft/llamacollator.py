@@ -135,7 +135,7 @@ class LlamaCollator:
             "attention_mask": attention_mask,
             "labels": labels,
         }
-        for k in ("pixel_values", "image_sizes", "pixel_attention_mask", "patch_attention_mask"):
+        for k in ("pixel_values", "image_sizes", "pixel_attention_mask", "patch_attention_mask", "aspect_ratio_ids", "aspect_ratio_mask"):
             if k in proc_full and isinstance(proc_full[k], torch.Tensor):
                 batch[k] = proc_full[k]
         return batch

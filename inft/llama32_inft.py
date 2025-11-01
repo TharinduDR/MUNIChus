@@ -1,12 +1,13 @@
+import argparse
+import os
+
 import torch
 from dataloader import build_processed_dataset 
-from params import MUNIChusLoadConfig
 from params import ( BasicParams, QLoRAParams, LoRAParams, MUNIChusLoadConfig, SFTParams)
-from transformers import AutoProcessor, AutoModelForImageTextToText, BitsAndBytesConfig, TrainingArguments
+from transformers import AutoProcessor, AutoModelForImageTextToText, BitsAndBytesConfig
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 from transformers.trainer_utils import set_seed
 from llamacollator import LlamaCollator
-import os
 from trl import SFTTrainer, SFTConfig
 from logger import JsonlLogger, TrainerLoggingCallback
 
@@ -29,19 +30,24 @@ print("Preferred dtype:", torch.cuda.get_device_capability())
 # -----------------------------
 # Training entry
 # -----------------------------
-def main():
+def main(training_mode: str = "basic") -> None:
+    training_mode = training_mode.lower()
+    if training_mode not in {"basic", "advanced"}:
+        raise ValueError("training_mode must be either 'basic' or 'advanced'")
+
     bp = BasicParams()
     ql = QLoRAParams()
     lp = LoRAParams()
     cfg = MUNIChusLoadConfig(split="train")
     sp = SFTParams()
+    is_advanced = training_mode == "advanced"
 
     set_seed(sp.seed)
 
     if not os.path.exists(bp.logs_dir):
         os.makedirs(bp.logs_dir)
 
-    task_tag = "qlora-lora-llama32"
+    task_tag = "qlora-lora-llama32-advanced" if is_advanced else "qlora-lora-llama32"
 
     log_path = os.path.join(bp.logs_dir, f"trainer_{task_tag}.jsonl")
 
@@ -86,74 +92,92 @@ def main():
     model = prepare_model_for_kbit_training(model)
 
     # --- LoRA ---
+    target_modules = lp.advanced_target_modules if is_advanced else lp.target_modules
     lora_cfg = LoraConfig(
         r=lp.r,
         lora_alpha=lp.alpha,
         lora_dropout=lp.dropout,
         bias=lp.bias,
-        target_modules=list(lp.target_modules),
+        target_modules=list(target_modules),
         task_type="CAUSAL_LM",
     )
     model = get_peft_model(model, lora_cfg)
+    
+    #sanity checks
+    # a) Print trainable params
     model.print_trainable_parameters()
 
-    # --- training args ---
-    args = TrainingArguments(
-            output_dir= sp.llama_32_output_dir,
-            # memory/throughput
-            per_device_train_batch_size=1, 
-            per_device_eval_batch_size=1,
-            gradient_accumulation_steps=16,
-            # optimizer (QLoRA best practice)
-            optim="adamw_torch_fused", #"adamw_torch",
-            learning_rate=1.5e-4,
-            lr_scheduler_type="cosine",
-            warmup_ratio=0.03,
-            weight_decay=0.0,
-            # precision and stability
-            bf16=True,
-            gradient_checkpointing=True,
-            max_grad_norm=0.3,
-            torch_compile=False,
-            # logging & saving
-            logging_steps=10,
-            save_strategy="steps",
-            save_steps=200,
-            save_total_limit=2,
-            save_safetensors=True,
-            report_to="none",
-            # eval: we’ll do custom gen-eval later
-            eval_strategy="no",
-            # keep pixel_values; don't drop columns from our collator
-            remove_unused_columns=False,
-            seed=sp.seed,
-            # data_seed=getattr(sp, "seed", 42),
-            # multi-GPU safety (optional)
-            ddp_find_unused_parameters=False,
-        )
+    # b) Any trainable params at all?
+    num_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    assert num_trainable > 0, "No trainable params — LoRA targets likely mismatched."
 
-    # sft_config = SFTConfig(packing=False, max_seq_length=bp.max_length) 
+    # c) Your batch truly supervises tokens
+    from torch.utils.data import DataLoader
+    b = next(iter(DataLoader(train_ds, batch_size=cfg.batch_size, collate_fn=data_collator)))
+    print("supervised tokens per row:", (b["labels"] != -100).sum(dim=1))
+    assert (b["labels"] != -100).any(), "All labels are -100 — no loss will flow."
+
+
+
+    model.config.use_cache = False
+
+    # --- training args ---
+    output_dir = sp.llama32_adv_output_dir if is_advanced else sp.llama_32_output_dir
+    args = SFTConfig(
+        output_dir=output_dir,
+        per_device_train_batch_size=1,
+        per_device_eval_batch_size=1,
+        gradient_accumulation_steps=sp.gradient_accumulation_steps,
+        optim="adamw_torch_fused",          # or "paged_adamw_8bit"
+        learning_rate=1.5e-4,
+        lr_scheduler_type="cosine",
+        warmup_ratio=sp.warmup_ratio,
+        weight_decay=sp.weight_decay,
+        bf16=True,
+        gradient_checkpointing=True,
+        max_grad_norm=sp.max_grad_norm,
+        logging_steps=sp.logging_steps,
+        save_strategy="steps",
+        save_steps=sp.save_steps,
+        save_total_limit=sp.save_total_limit,
+        save_safetensors=True,
+        report_to="none",
+        remove_unused_columns=False,
+        seed=sp.seed,
+        ddp_find_unused_parameters=False,
+        max_seq_length=bp.max_length,
+        packing=False,
+        dataset_kwargs={"skip_prepare_dataset": True},
+    )
+
     trainer = SFTTrainer(
         model=model,
         args=args,
         train_dataset=train_ds,
         eval_dataset=None,
-        peft_config=lora_cfg,
         data_collator=data_collator,
         tokenizer=tok,
-        max_seq_length=bp.max_length,
         callbacks=[logger_cb],
     )
 
 
     trainer_stats = trainer.train()
     print("Training complete. Metrics:", trainer_stats.metrics)
-    os.makedirs(sp.llama32_best_model_dir, exist_ok=True)
+    best_model_dir = sp.llama32_adv_best_model_dir if is_advanced else sp.llama32_best_model_dir
+    os.makedirs(best_model_dir, exist_ok=True)
 
-    trainer.model.save_pretrained(sp.llama32_best_model_dir)
-    processor.save_pretrained(sp.llama32_best_model_dir)
-    print(f"Saved adapters + processor to: {sp.llama32_best_model_dir}")
+    trainer.model.save_pretrained(best_model_dir)
+    processor.save_pretrained(best_model_dir)
+    print(f"Saved adapters + processor to: {best_model_dir}")
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Supervised fine-tuning for Llama 3.2 vision model.")
+    parser.add_argument(
+        "--training-mode",
+        choices=["basic", "advanced"],
+        default="basic",
+        help="Choose between the basic LoRA recipe or an advanced variant.",
+    )
+    cli_args = parser.parse_args()
+    main(training_mode=cli_args.training_mode)

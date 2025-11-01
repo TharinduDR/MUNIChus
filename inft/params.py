@@ -88,7 +88,7 @@ class LoRAParams:
     # attention + MLP projections
     target_modules: Tuple[str, ...] = ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj",)
     advanced_target_modules: Tuple[str, ...] = ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj","mm_projector", "multi_modal_projector", "vision_proj")
-
+    aya_advanced_target_modules: Tuple[str, ...] = ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj","multi_modal_projector.linear_1", "multi_modal_projector.linear_2",)
 
 
 
@@ -98,19 +98,27 @@ class LoRAParams:
 class SFTParams:
     num_epochs: int = 3
     num_workers: int = 4
-    lr: float = 2e-5
-    weight_decay: float = 1e-4
+    lr: float = 1.5e-4
+    weight_decay: float = 1e-6
     warmup_steps: int = 100
+    warmup_ratio: float = 0.03
     max_grad_norm: float = 0.3
-    gradient_accumulation_steps: int = 1
+    gradient_accumulation_steps: int = 16
     logging_steps: int = 50
     save_steps: int = 500
     eval_steps: int = 500
     llama_32_output_dir: str = f"/projects/mzampier/tsuyog/MUNIChus/inft/outputs/llama_32_sft"
     llama32_best_model_dir: str = f"/projects/mzampier/tsuyog/MUNIChus/inft/outputs/llama_32_sft/best_model"
+    # advaced llama
+    llama32_adv_output_dir: str = f"/projects/mzampier/tsuyog/MUNIChus/inft/outputs/llama32_adv_sft"
+    llama32_adv_best_model_dir: str = f"/projects/mzampier/tsuyog/MUNIChus/inft/outputs/llama32_adv_sft/best_model"
+
     aya_output_dir: str = f"/projects/mzampier/tsuyog/MUNIChus/inft/outputs/aya_sft"
     aya_best_model_dir: str = f"/projects/mzampier/tsuyog/MUNIChus/inft/outputs/aya_sft/best_model"
-    
+    # advanced aya
+    aya_adv_output_dir: str = f"/projects/mzampier/tsuyog/MUNIChus/inft/outputs/aya_adv_sft"
+    aya_adv_best_model_dir: str = f"/projects/mzampier/tsuyog/MUNIChus/inft/outputs/aya_adv_sft/best_model"
+
     inference_batch_size: int = 1
     fp16: bool = True
     early_stopping_patience: int = 3
