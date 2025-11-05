@@ -21,12 +21,12 @@ except ImportError:
 # Initialize model and processor
 print("Loading Qwen3-VL-8B-Instruct...")
 model = Qwen3VLForConditionalGeneration.from_pretrained(
-    "Qwen/Qwen3-VL-8B-Instruct",
+    "Qwen/Qwen3-VL-32B-Instruct",
     dtype="auto",
     device_map="auto"
 )
 
-processor = AutoProcessor.from_pretrained("Qwen/Qwen3-VL-8B-Instruct")
+processor = AutoProcessor.from_pretrained("Qwen/Qwen3-VL-32B-Instruct")
 
 # Optional: Enable flash attention for better performance
 # model = Qwen3VLForConditionalGeneration.from_pretrained(
