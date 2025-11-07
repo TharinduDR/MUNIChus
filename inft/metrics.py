@@ -241,8 +241,8 @@ def main() -> None:
     basic_params = BasicParams()
 
     generation_files = {
-        "llama32_hf": Path(basic_params.llama_hf_gen_file),
-        "aya_hf": Path(basic_params.aya_hf_gen_file),
+    #     "llama32_hf": Path(basic_params.llama_hf_gen_file),
+    #     "aya_hf": Path(basic_params.aya_hf_gen_file),
         "llama32_inft": Path(basic_params.llama_inft_gen_file),
         "aya_inft": Path(basic_params.aya_inft_gen_file),
     }
