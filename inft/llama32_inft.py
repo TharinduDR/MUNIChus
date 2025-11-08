@@ -1,11 +1,13 @@
 import argparse
 import os
+import re
+from typing import Tuple
 
 import torch
 from dataloader import build_processed_dataset 
 from params import ( BasicParams, QLoRAParams, LoRAParams, MUNIChusLoadConfig, SFTParams)
 from transformers import AutoProcessor, AutoModelForImageTextToText, BitsAndBytesConfig
-from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training, PeftModel
 from transformers.trainer_utils import set_seed
 from llamacollator import LlamaCollator
 from trl import SFTTrainer, SFTConfig
@@ -25,12 +27,49 @@ print("FP16 supported?", torch.cuda.is_available())  # FP16 works if you have CU
 print("Preferred dtype:", torch.cuda.get_device_capability())
 
 
+def _resolve_model_source(
+    load_from_checkpoint: bool, is_advanced: bool, sp: SFTParams, bp: BasicParams
+) -> Tuple[str, bool, bool]:
+    """
+    Decide whether to initialize training from an existing checkpoint directory or the base HF repo.
+    Returns (model_path, use_checkpoint_processor, has_adapter_weights).
+    """
+    if load_from_checkpoint:
+        candidate = sp.llama32_adv_best_model_dir if is_advanced else sp.llama32_best_model_dir
+        if os.path.isdir(candidate) and os.listdir(candidate):
+            print(f"Loading model + processor from checkpoint: {candidate}")
+            return candidate, True, False
+        print(f"Checkpoint path '{candidate}' missing or empty; searching for latest checkpoint directory.")
+        output_dir = sp.llama32_adv_output_dir if is_advanced else sp.llama_32_output_dir
+        if os.path.isdir(output_dir):
+            candidates = [os.path.join(output_dir, name) for name in os.listdir(output_dir)]
+            dir_candidates = [path for path in candidates if os.path.isdir(path)]
+            pattern = re.compile(r"checkpoint[-_](\d+)$")
+            numbered = []
+            fallback = []
+            for path in dir_candidates:
+                match = pattern.search(os.path.basename(path))
+                if match:
+                    numbered.append((int(match.group(1)), path))
+                else:
+                    fallback.append(path)
+            if numbered:
+                best_path = max(numbered, key=lambda item: item[0])[1]
+                print(f"Found checkpoint directory: {best_path}")
+                has_adapter = os.path.isfile(os.path.join(best_path, "adapter_config.json"))
+                return best_path, False, has_adapter
+            if fallback:
+                best_path = max(fallback, key=os.path.getmtime)
+                print(f"Using most recent directory under output_dir: {best_path}")
+                has_adapter = os.path.isfile(os.path.join(best_path, "adapter_config.json"))
+                return best_path, False, has_adapter
+        print("No suitable checkpoint directories found; falling back to HF base model.")
+    return bp.llama_model_name, False, False
 
 
-# -----------------------------
-# Training entry
-# -----------------------------
-def main(training_mode: str = "basic") -> None:
+
+# Training 
+def main(training_mode: str = "basic", load_from_checkpoint: bool = False) -> None:
     training_mode = training_mode.lower()
     if training_mode not in {"basic", "advanced"}:
         raise ValueError("training_mode must be either 'basic' or 'advanced'")
@@ -54,8 +93,14 @@ def main(training_mode: str = "basic") -> None:
     jsonloger = JsonlLogger(path=log_path)
     logger_cb = TrainerLoggingCallback(jsonloger, run_name=f"inft-{task_tag}-trainer")
 
+    # model source is local lora-adapters if HF style best_model does not exists
+    model_source, use_checkpoint_processor, has_adapters = _resolve_model_source(
+        load_from_checkpoint=load_from_checkpoint, is_advanced=is_advanced, sp=sp, bp=bp
+    )
+    processor_source = model_source if use_checkpoint_processor else bp.llama_processor_name
+
     # --- processor ---
-    processor = AutoProcessor.from_pretrained(bp.llama_processor_name, trust_remote_code=True)
+    processor = AutoProcessor.from_pretrained(processor_source, trust_remote_code=True)
     tok = processor.tokenizer
     if tok.pad_token_id is None:
         tok.pad_token = tok.eos_token
@@ -81,37 +126,55 @@ def main(training_mode: str = "basic") -> None:
         bnb_4bit_compute_dtype=compute_dtype,
     )
 
+    ##############################################################################################
     # --- model ---
-    model = AutoModelForImageTextToText.from_pretrained(
-        bp.llama_model_name,
-        quantization_config=bnb_cfg,
-        device_map="auto",
-        trust_remote_code=True,
-        attn_implementation=bp.attn_impl,
-    )
-    model = prepare_model_for_kbit_training(model)
+    # loads the basemode fom HF and combines the QLoRA adapters 
+    if load_from_checkpoint and has_adapters:
+        print(f"loading base model from:{bp.llama_model_name} and adapters from{model_source}")
+        # load HF model
+        base_model = AutoModelForImageTextToText.from_pretrained(
+            bp.llama_model_name,
+            quantization_config=bnb_cfg,
+            device_map="auto",
+            trust_remote_code=True,
+            attn_implementation=bp.attn_impl,
+        )    
+        base_model = prepare_model_for_kbit_training(base_model)
+        # load lora adapters 
+        model = PeftModel.from_pretrained(base_model, model_source)
+    else:
+        # full HF style mode from local dir i.e best_model dir, and prepares for PEFT 
+        model = AutoModelForImageTextToText.from_pretrained(
+            model_source,
+            quantization_config=bnb_cfg,
+            device_map="auto",
+            trust_remote_code=True,
+            attn_implementation=bp.attn_impl,
+        )
+        model = prepare_model_for_kbit_training(model)
 
-    # --- LoRA ---
-    target_modules = lp.advanced_target_modules if is_advanced else lp.target_modules
-    lora_cfg = LoraConfig(
-        r=lp.r,
-        lora_alpha=lp.alpha,
-        lora_dropout=lp.dropout,
-        bias=lp.bias,
-        target_modules=list(target_modules),
-        task_type="CAUSAL_LM",
-    )
-    model = get_peft_model(model, lora_cfg)
-    
+        # --- LoRA ---
+        target_modules = lp.advanced_target_modules if is_advanced else lp.target_modules
+        lora_cfg = LoraConfig(
+            r=lp.r,
+            lora_alpha=lp.alpha,
+            lora_dropout=lp.dropout,
+            bias=lp.bias,
+            target_modules=list(target_modules),
+            task_type="CAUSAL_LM",
+        )
+        model = get_peft_model(model, lora_cfg)
+    ##############################################################################################
+
     #sanity checks
-    # a) Print trainable params
+    # Print trainable params
     model.print_trainable_parameters()
 
-    # b) Any trainable params at all?
+    # Any trainable params at all?
     num_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     assert num_trainable > 0, "No trainable params — LoRA targets likely mismatched."
 
-    # c) Your batch truly supervises tokens
+    # batch truly supervises tokens
     from torch.utils.data import DataLoader
     b = next(iter(DataLoader(train_ds, batch_size=cfg.batch_size, collate_fn=data_collator)))
     print("supervised tokens per row:", (b["labels"] != -100).sum(dim=1))
@@ -166,9 +229,12 @@ def main(training_mode: str = "basic") -> None:
     best_model_dir = sp.llama32_adv_best_model_dir if is_advanced else sp.llama32_best_model_dir
     os.makedirs(best_model_dir, exist_ok=True)
 
-    trainer.model.save_pretrained(best_model_dir)
+    print("Merging LoRA adapters into the base model (bf16) before saving...")
+    merged_model = trainer.model.merge_and_unload()
+    merged_model = merged_model.to(dtype=torch.bfloat16)
+    merged_model.save_pretrained(best_model_dir)
     processor.save_pretrained(best_model_dir)
-    print(f"Saved adapters + processor to: {best_model_dir}")
+    print(f"[Merged] Saved adapters + processor to: {best_model_dir}")
 
 
 if __name__ == "__main__":
@@ -179,5 +245,10 @@ if __name__ == "__main__":
         default="basic",
         help="Choose between the basic LoRA recipe or an advanced variant.",
     )
+    parser.add_argument(
+        "--load-from-checkpoint",
+        action="store_true",
+        help="If set, initialize weights/processors from the latest best_model_dir/checkpoint instead of the HF base model.",
+    )
     cli_args = parser.parse_args()
-    main(training_mode=cli_args.training_mode)
+    main(training_mode=cli_args.training_mode, load_from_checkpoint=cli_args.load_from_checkpoint)

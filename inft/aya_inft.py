@@ -1,6 +1,7 @@
 import argparse
 import os
 import torch
+from typing import Tuple
 
 from dataloader import build_processed_dataset
 from params import (
@@ -13,7 +14,7 @@ from params import (
 from transformers import AutoModelForImageTextToText, AutoProcessor, TrainingArguments, BitsAndBytesConfig
 from transformers.trainer_utils import set_seed
 from trl import SFTConfig, SFTTrainer
-from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training, PeftModel
 
 from ayacollator import AyaCollator
 from logger import JsonlLogger, TrainerLoggingCallback
@@ -107,7 +108,47 @@ def _build_sft_args(sp: SFTParams, bp: BasicParams, output_dir: str) -> SFTConfi
     )
 
 
-def main(training_mode: str = "basic") -> None:
+def _resolve_model_source(
+    load_from_checkpoint: bool, is_advanced: bool, sp: SFTParams, bp: BasicParams
+) -> Tuple[str, bool, bool]:
+    """
+    Choose between a locally saved checkpoint directory and the base HF repo.
+    Returns (model_path, use_checkpoint_processor, has_adapter_weights).
+    """
+    if load_from_checkpoint:
+        candidate = sp.aya_adv_best_model_dir if is_advanced else sp.aya_best_model_dir
+        if os.path.isdir(candidate) and os.listdir(candidate):
+            print(f"Loading model + processor from checkpoint: {candidate}")
+            return candidate, True, False
+        print(f"Checkpoint path '{candidate}' missing or empty; searching for latest checkpoint directory.")
+        output_dir = sp.aya_adv_output_dir if is_advanced else sp.aya_output_dir
+        if os.path.isdir(output_dir):
+            candidates = [os.path.join(output_dir, name) for name in os.listdir(output_dir)]
+            dir_candidates = [path for path in candidates if os.path.isdir(path)]
+            pattern = re.compile(r"checkpoint[-_](\d+)$")
+            numbered = []
+            fallback = []
+            for path in dir_candidates:
+                match = pattern.search(os.path.basename(path))
+                if match:
+                    numbered.append((int(match.group(1)), path))
+                else:
+                    fallback.append(path)
+            if numbered:
+                best_path = max(numbered, key=lambda item: item[0])[1]
+                print(f"Found checkpoint directory: {best_path}")
+                has_adapter = os.path.isfile(os.path.join(best_path, "adapter_config.json"))
+                return best_path, False, has_adapter
+            if fallback:
+                best_path = max(fallback, key=os.path.getmtime)
+                print(f"Using most recent directory under output_dir: {best_path}")
+                has_adapter = os.path.isfile(os.path.join(best_path, "adapter_config.json"))
+                return best_path, False, has_adapter
+        print("No suitable checkpoint directories found; falling back to HF base model.")
+    return bp.aya_model_name, False, False
+
+
+def main(training_mode: str = "basic", load_from_checkpoint: bool = False) -> None:
     training_mode = training_mode.lower()
     if training_mode not in {"basic", "advanced"}:
         raise ValueError("training_mode must be either 'basic' or 'advanced'")
@@ -131,8 +172,16 @@ def main(training_mode: str = "basic") -> None:
     json_logger = JsonlLogger(path=log_path)
     trainer_cb = TrainerLoggingCallback(json_logger, run_name=f"inft-{task_tag}-trainer")
 
+    model_source, use_checkpoint_processor, has_adapters = _resolve_model_source(
+        load_from_checkpoint=load_from_checkpoint,
+        is_advanced=is_advanced,
+        sp=sft_params,
+        bp=base_params,
+    )
+    processor_source = model_source if use_checkpoint_processor else base_params.aya_processor_name
+
     processor = AutoProcessor.from_pretrained(
-        base_params.aya_processor_name, trust_remote_code=True
+        processor_source, trust_remote_code=True
     )
     tokenizer = processor.tokenizer
     if tokenizer.pad_token_id is None:
@@ -151,35 +200,54 @@ def main(training_mode: str = "basic") -> None:
 
     quant_config = _build_bnb_config(qlora_params)
 
-    model = AutoModelForImageTextToText.from_pretrained(
-        base_params.aya_model_name,
-        quantization_config=quant_config,
-        device_map="auto",
-        trust_remote_code=True,
-        attn_implementation=base_params.attn_impl,
-    )
-    
-    # if is_advanced:
-    #     print("Advanced training mode: Finetubeable Linear modules")
-    #     print("\n".join(list_linear_modules(model)))
+    ##############################################################################################
+    # --- model ---
+    # loads the basemode fom HF and combines the QLoRA adapters 
+    if load_from_checkpoint and has_adapters:
+        print(f"loading base model from:{base_params.aya_model_name} and adapters from{model_source}")
+        base_model = AutoModelForImageTextToText.from_pretrained(
+            base_params.aya_model_name,
+            quantization_config=quant_config,
+            device_map="auto",
+            trust_remote_code=True,
+            attn_implementation=base_params.attn_impl,
+        )
+        base_model = prepare_model_for_kbit_training(base_model)
+        # load lora adapters 
+        model = PeftModel.from_pretrained(base_model, model_source)
+    else:
+        # full HF style mode from local dir i.e best_model dir, and prepares for PEFT 
+        model = AutoModelForImageTextToText.from_pretrained(
+            model_source,
+            quantization_config=quant_config,
+            device_map="auto",
+            trust_remote_code=True,
+            attn_implementation=base_params.attn_impl,
+        )
+        
+        # if is_advanced:
+        #     print("Advanced training mode: Finetubeable Linear modules")
+        #     print("\n".join(list_linear_modules(model)))
 
-    model = prepare_model_for_kbit_training(model)
+        model = prepare_model_for_kbit_training(model)
 
     if hasattr(model, "config"):
         model.config.use_cache = False
 
-    lora_config = _build_lora_config(lora_params, training_mode)
-    model = get_peft_model(model, lora_config)
+    # applting lora_config if it is loaded form best_model or HF 
+    if not (load_from_checkpoint and has_adapters):
+        lora_config = _build_lora_config(lora_params, training_mode)
+        model = get_peft_model(model, lora_config)
 
     #sanity checks
-    # a) Print trainable params
+    # Print trainable params
     model.print_trainable_parameters()
 
-    # b) Any trainable params at all?
+    # Any trainable params at all?
     num_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     assert num_trainable > 0, "No trainable params — LoRA targets likely mismatched."
 
-    # c) Your batch truly supervises tokens
+    # batch truly supervises tokens
     from torch.utils.data import DataLoader
     b = next(iter(DataLoader(dataset, batch_size=data_cfg.batch_size, collate_fn=data_collator)))
     print("supervised tokens per row:", (b["labels"] != -100).sum(dim=1))
@@ -209,7 +277,10 @@ def main(training_mode: str = "basic") -> None:
         sft_params.aya_adv_best_model_dir if is_advanced else sft_params.aya_best_model_dir
     )
     os.makedirs(best_model_dir, exist_ok=True)
-    trainer.model.save_pretrained(best_model_dir)
+    print("Merging LoRA adapters into the base model (bf16) before saving...")
+    merged_model = trainer.model.merge_and_unload()
+    merged_model = merged_model.to(dtype=torch.bfloat16)
+    merged_model.save_pretrained(best_model_dir)
     processor.save_pretrained(best_model_dir)
     print(f"Saved adapters + processor to: {best_model_dir}")
 
@@ -222,5 +293,10 @@ if __name__ == "__main__":
         default="basic",
         help="Choose between the basic LoRA recipe or an advanced variant.",
     )
+    parser.add_argument(
+        "--load-from-checkpoint",
+        action="store_true",
+        help="If set, initialize weights/processors from the latest best_model_dir or checkpoint instead of the HF base model.",
+    )
     cli_args = parser.parse_args()
-    main(training_mode=cli_args.training_mode)
+    main(training_mode=cli_args.training_mode, load_from_checkpoint=cli_args.load_from_checkpoint)

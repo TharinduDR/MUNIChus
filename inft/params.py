@@ -96,7 +96,7 @@ class LoRAParams:
 
 @dataclass
 class SFTParams:
-    num_epochs: int = 3
+    num_epochs: int = 1
     num_workers: int = 4
     lr: float = 1.5e-4
     weight_decay: float = 1e-6

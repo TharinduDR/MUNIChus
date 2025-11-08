@@ -305,8 +305,6 @@ def llama32_gen_caption(cfg:MUNIChusLoadConfig, params:BasicParams, output_path:
 
 
 
-
-
 def aya_gen_caption(cfg:MUNIChusLoadConfig, params:BasicParams, output_path: Optional[str] = None):
     os.makedirs(params.logs_dir, exist_ok=True)
     os.makedirs(params.output_dir, exist_ok=True)
