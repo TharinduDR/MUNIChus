@@ -109,15 +109,19 @@ class SFTParams:
     eval_steps: int = 500
     llama_32_output_dir: str = f"/projects/mzampier/tsuyog/MUNIChus/inft/outputs/llama_32_sft"
     llama32_best_model_dir: str = f"/projects/mzampier/tsuyog/MUNIChus/inft/outputs/llama_32_sft/best_model"
+    llama32_adapter_model_dir:str = f"/projects/mzampier/tsuyog/MUNIChus/inft/outputs/llama_32_sft/lora_adapter"
     # advaced llama
     llama32_adv_output_dir: str = f"/projects/mzampier/tsuyog/MUNIChus/inft/outputs/llama32_adv_sft"
     llama32_adv_best_model_dir: str = f"/projects/mzampier/tsuyog/MUNIChus/inft/outputs/llama32_adv_sft/best_model"
+    llama32_adv_adapter_model_dir:str = f"/projects/mzampier/tsuyog/MUNIChus/inft/outputs/llama32_adv_sft/lora_adapter"
 
     aya_output_dir: str = f"/projects/mzampier/tsuyog/MUNIChus/inft/outputs/aya_sft"
     aya_best_model_dir: str = f"/projects/mzampier/tsuyog/MUNIChus/inft/outputs/aya_sft/best_model"
+    aya_adpapter_model_dir: str = f"/projects/mzampier/tsuyog/MUNIChus/inft/outputs/aya_sft/lora_adapter"
     # advanced aya
     aya_adv_output_dir: str = f"/projects/mzampier/tsuyog/MUNIChus/inft/outputs/aya_adv_sft"
     aya_adv_best_model_dir: str = f"/projects/mzampier/tsuyog/MUNIChus/inft/outputs/aya_adv_sft/best_model"
+    aya_adv_adapter_model_dir: str = f"/projects/mzampier/tsuyog/MUNIChus/inft/outputs/aya_adv_sft/lora_adapter"
 
     inference_batch_size: int = 1
     fp16: bool = True

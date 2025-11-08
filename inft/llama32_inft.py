@@ -2,7 +2,7 @@ import argparse
 import os
 import re
 from typing import Tuple
-
+from utils import merge_lora_adapter
 import torch
 from dataloader import build_processed_dataset 
 from params import ( BasicParams, QLoRAParams, LoRAParams, MUNIChusLoadConfig, SFTParams)
@@ -141,7 +141,19 @@ def main(training_mode: str = "basic", load_from_checkpoint: bool = False) -> No
         )    
         base_model = prepare_model_for_kbit_training(base_model)
         # load lora adapters 
-        model = PeftModel.from_pretrained(base_model, model_source)
+        # When resuming from a LoRA checkpoint the adapters default to inference mode,
+        # make sure the PEFT wrapper re-enables gradients on those layers.
+        try:
+            model = PeftModel.from_pretrained(base_model, model_source, is_trainable=True)
+        except TypeError:
+            print("Peft could not set model to train, Manually doing it.")
+            model = PeftModel.from_pretrained(base_model, model_source)
+            peft_cfg = model.peft_config.get("default")
+            if peft_cfg is not None:
+                peft_cfg.inference_mode = False
+            for name, param in model.named_parameters():
+                if "lora_" in name:
+                    param.requires_grad = True
     else:
         # full HF style mode from local dir i.e best_model dir, and prepares for PEFT 
         model = AutoModelForImageTextToText.from_pretrained(
@@ -226,14 +238,15 @@ def main(training_mode: str = "basic", load_from_checkpoint: bool = False) -> No
 
     trainer_stats = trainer.train()
     print("Training complete. Metrics:", trainer_stats.metrics)
+    adapter_dir = sp.llama32_adv_adapter_model_dir if is_advanced else sp.llama32_adapter_model_dir
     best_model_dir = sp.llama32_adv_best_model_dir if is_advanced else sp.llama32_best_model_dir
-    os.makedirs(best_model_dir, exist_ok=True)
+
+    trainer.save_model(adapter_dir)
+    processor.save_pretrained(adapter_dir)
+    print(f"LoRA adapters saved to {adapter_dir}")
 
     print("Merging LoRA adapters into the base model (bf16) before saving...")
-    merged_model = trainer.model.merge_and_unload()
-    merged_model = merged_model.to(dtype=torch.bfloat16)
-    merged_model.save_pretrained(best_model_dir)
-    processor.save_pretrained(best_model_dir)
+    merge_lora_adapter(bp.llama_model_name, adapter_dir, best_model_dir)
     print(f"[Merged] Saved adapters + processor to: {best_model_dir}")
 
 
