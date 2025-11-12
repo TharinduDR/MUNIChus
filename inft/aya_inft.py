@@ -83,6 +83,7 @@ def _build_lora_config(lora: LoRAParams, training_mode: str) -> LoraConfig:
 def _build_sft_args(sp: SFTParams, bp: BasicParams, output_dir: str) -> SFTConfig:
     return SFTConfig(
         output_dir=output_dir,
+        num_train_epochs=sp.num_epochs,
         per_device_train_batch_size=1,
         per_device_eval_batch_size=1,
         gradient_accumulation_steps=sp.gradient_accumulation_steps,

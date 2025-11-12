@@ -38,6 +38,12 @@ class AyaCollator:
             raise ValueError("AutoProcessor must include a tokenizer for Aya Vision.")
         self.processor = processor
         self.tok = processor.tokenizer
+
+        if self.tok.pad_token_id is None:
+            self.tok.pad_token = self.tok.eos_token
+        self.tok.padding_side = "right"
+        self.tok.truncation_side = "right"
+
         self.input_data_format = input_data_format
         self.add_generation_prompt = add_generation_prompt
 

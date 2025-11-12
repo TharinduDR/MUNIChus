@@ -200,6 +200,7 @@ def main(training_mode: str = "basic", load_from_checkpoint: bool = False) -> No
     output_dir = sp.llama32_adv_output_dir if is_advanced else sp.llama_32_output_dir
     args = SFTConfig(
         output_dir=output_dir,
+        num_train_epochs=sp.num_epochs,
         per_device_train_batch_size=1,
         per_device_eval_batch_size=1,
         gradient_accumulation_steps=sp.gradient_accumulation_steps,
