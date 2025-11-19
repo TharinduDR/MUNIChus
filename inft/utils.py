@@ -53,3 +53,10 @@ def merge_lora_adapter(
 
     print(f"Merged model + processor saved to {output_dir}")
 
+
+# if __name__ == "__main__":
+#     from params import SFTParams, BasicParams
+#     sp = SFTParams()
+#     bp = BasicParams()
+#     checkpoint_dir = f"{sp.llama_32_output_dir}/checkpoint-8500"
+#     merge_lora_adapter(bp.llama_model_name, checkpoint_dir, sp.llama32_best_model_dir)

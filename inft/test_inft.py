@@ -406,13 +406,13 @@ def main() -> None:
     output_root = os.path.join(basic.output_dir, "inft_gen") if basic.prefer_sft else os.path.join(basic.output_dir, "hf_gen")
 
     
-    llama_output_path = os.path.join(output_root, "llama32_inft.jsonl")
+    llama_output_path = os.path.join(output_root, "llama32_inft_01.jsonl")
     try:
         llama_records = llama32_gen_caption(cfg=cfg, params=basic, output_path=llama_output_path) 
     except Exception as exc:
         print(f"Llama32 generation failed: {exc}")
 
-    aya_output_path = os.path.join(output_root, "aya_inft.jsonl")
+    aya_output_path = os.path.join(output_root, "aya_inft_01.jsonl")
     try:
         aya_records = aya_gen_caption(cfg=cfg, params=basic, output_path=aya_output_path)
     except Exception as exc:
