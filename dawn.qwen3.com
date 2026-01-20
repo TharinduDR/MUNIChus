@@ -6,6 +6,9 @@
 #SBATCH --gres=gpu:3 # Number of requested GPUs per node
 #SBATCH --time=12:00:00              # total run time limit (HH:MM:SS)
 
+
+ulimit -n 65536
+
 module purge
 module load rhel8/default-dawn
 module load intelpython-conda/2025.0

@@ -3,47 +3,20 @@ import os
 import gc
 import json
 import signal
+import resource
 from functools import wraps
 
 import torch
 import intel_extension_for_pytorch as ipex
 import pandas as pd
 from transformers import Qwen3VLForConditionalGeneration, AutoProcessor, set_seed
-from datasets import load_dataset
+from datasets import load_dataset, disable_caching
 from tqdm import tqdm
 from sacrebleu.metrics import BLEU, CHRF
 from pycocoevalcap.cider.cider import Cider
 
-
-class TimeoutError(Exception):
-    pass
-
-
-def timeout(seconds):
-    """Decorator to add timeout to a function"""
-
-    def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            def handler(signum, frame):
-                raise TimeoutError(f"Function timed out after {seconds} seconds")
-
-            # Set the signal handler
-            old_handler = signal.signal(signal.SIGALRM, handler)
-            signal.alarm(seconds)
-
-            try:
-                result = func(*args, **kwargs)
-            finally:
-                signal.alarm(0)
-                signal.signal(signal.SIGALRM, old_handler)
-
-            return result
-
-        return wrapper
-
-    return decorator
-
+# Disable HuggingFace datasets caching to reduce file handles
+disable_caching()
 
 # For Japanese/Chinese tokenization
 try:
@@ -77,6 +50,23 @@ LANGUAGE_NAMES = {
 CJK_LANGUAGES = ["ja", "zh", "yue"]
 
 
+class TimeoutError(Exception):
+    pass
+
+
+def increase_file_limit():
+    """Try to increase the file descriptor limit"""
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        print(f"Current file limits - Soft: {soft}, Hard: {hard}")
+        # Try to set soft limit to hard limit
+        resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
+        new_soft, new_hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        print(f"New file limits - Soft: {new_soft}, Hard: {new_hard}")
+    except Exception as e:
+        print(f"Could not increase file limit: {e}")
+
+
 def log_gpu_memory():
     """Log GPU memory usage for all available XPU devices"""
     if hasattr(torch, 'xpu') and torch.xpu.is_available():
@@ -97,9 +87,9 @@ def clear_memory():
     if hasattr(torch, 'xpu'):
         for i in range(torch.xpu.device_count()):
             with torch.xpu.device(i):
-                torch.xpu.synchronize()  # Wait for all operations to complete
+                torch.xpu.synchronize()
                 torch.xpu.empty_cache()
-                torch.xpu.synchronize()  # Ensure cache is cleared
+                torch.xpu.synchronize()
 
 
 def sync_all_devices():
@@ -173,13 +163,9 @@ Caption in {LANGUAGE_NAMES[language]}:"""
             return_tensors="pt"
         )
         inputs = inputs.to(model.device)
-
-        # Explicit sync before generation
         sync_all_devices()
 
         generated_ids = model.generate(**inputs, max_new_tokens=100)
-
-        # Explicit sync after generation
         sync_all_devices()
 
         generated_ids_trimmed = [
@@ -192,13 +178,15 @@ Caption in {LANGUAGE_NAMES[language]}:"""
             clean_up_tokenization_spaces=False
         )
 
+        # Explicitly delete tensors
+        del inputs, generated_ids, generated_ids_trimmed
+
         return output_text[0].strip()
 
-    try:
-        # Set up timeout using signal
-        def handler(signum, frame):
-            raise TimeoutError(f"Generation timed out after {timeout_seconds} seconds")
+    def handler(signum, frame):
+        raise TimeoutError(f"Generation timed out after {timeout_seconds} seconds")
 
+    try:
         old_handler = signal.signal(signal.SIGALRM, handler)
         signal.alarm(timeout_seconds)
 
@@ -218,7 +206,7 @@ Caption in {LANGUAGE_NAMES[language]}:"""
     except RuntimeError as e:
         error_str = str(e)
         if "OUT_OF_RESOURCES" in error_str or "out of memory" in error_str.lower():
-            print(f"OOM error, clearing cache and retrying with shorter generation...")
+            print(f"OOM error, clearing cache and retrying...")
             clear_memory()
 
             try:
@@ -249,6 +237,7 @@ Caption in {LANGUAGE_NAMES[language]}:"""
                         clean_up_tokenization_spaces=False
                     )
 
+                    del inputs, generated_ids, generated_ids_trimmed
                     return output_text[0].strip()
                 finally:
                     signal.alarm(0)
@@ -269,76 +258,54 @@ Caption in {LANGUAGE_NAMES[language]}:"""
         return ""
 
 
-def evaluate_language(model, processor, lang_code, dataset_name, num_samples=None, output_folder=None):
-    """Evaluate model on a specific language with BLEU-4, CIDEr, and chrF"""
+def preload_all_datasets(dataset_name, languages):
+    """Pre-load all datasets at once to avoid file handle issues"""
+    print("\n" + "=" * 60)
+    print("Pre-loading all datasets...")
+    print("=" * 60)
 
-    print(f"\n{'=' * 80}")
-    print(f"Evaluating {LANGUAGE_NAMES[lang_code]} ({lang_code})")
-    print(f"{'=' * 80}")
+    all_datasets = {}
 
-    # Load test set
-    dataset = load_dataset(dataset_name, lang_code)
-    test_data = dataset['test']
-
-    if num_samples:
-        test_data = test_data.select(range(min(num_samples, len(test_data))))
-
-    print(f"Processing {len(test_data)} examples...")
-
-    predictions = []
-    references = []
-
-    # Generate captions
-    for i, example in enumerate(tqdm(test_data, desc=f"Generating {lang_code}")):
-        # Clear memory more frequently (every 5 samples) and sync
-        if i % 5 == 0:
-            sync_all_devices()
-            clear_memory()
-
+    for lang in languages:
+        print(f"Loading {lang}...")
         try:
-            generated_caption = generate_caption(
-                model,
-                processor,
-                example['image'],
-                example['content'],
-                lang_code,
-                timeout_seconds=120  # 2 minute timeout per sample
-            )
+            ds = load_dataset(dataset_name, lang)
+            # Convert to list of dicts to fully load into memory and release file handles
+            test_data = [
+                {
+                    'image': example['image'],
+                    'content': example['content'],
+                    'caption': example['caption']
+                }
+                for example in ds['test']
+            ]
+            all_datasets[lang] = test_data
+            print(f"  Loaded {len(test_data)} examples for {lang}")
 
-            predictions.append(generated_caption)
-            references.append([example['caption']])
-
-            # Sync after each successful generation
-            sync_all_devices()
-
-            # Print sample outputs
-            if i < 3:
-                print(f"\nSample {i + 1}:")
-                print(f"Generated: {generated_caption}")
-                print(f"Reference: {example['caption']}")
-                print("-" * 80)
-
-            # Save intermediate results every 100 samples
-            if output_folder and (i + 1) % 100 == 0:
-                intermediate_file = os.path.join(output_folder, f"predictions_{lang_code}_checkpoint_{i + 1}.json")
-                with open(intermediate_file, "w", encoding="utf-8") as f:
-                    json.dump({
-                        "predictions": predictions,
-                        "references": [ref[0] for ref in references],
-                        "completed": i + 1
-                    }, f, ensure_ascii=False, indent=2)
-                print(f"\nCheckpoint saved: {intermediate_file}")
+            # Explicitly delete the dataset object
+            del ds
+            gc.collect()
 
         except Exception as e:
-            print(f"Error on example {i}: {e}")
-            predictions.append("")
-            references.append([example['caption']])
-            sync_all_devices()
-            clear_memory()
+            print(f"  Error loading {lang}: {e}")
+            all_datasets[lang] = None
 
-    # Initialize metrics
+    print("All datasets loaded!")
+    print("=" * 60 + "\n")
+
+    # Force garbage collection after loading all datasets
+    gc.collect()
+
+    return all_datasets
+
+
+def calculate_metrics(predictions, references, lang_code):
+    """Calculate BLEU, chrF, and CIDEr metrics"""
+
+    # Initialize metrics fresh each time
     chrf_metric = CHRF()
     cider_scorer = Cider()
+    bleu_metric = BLEU(max_ngram_order=4)
 
     # Tokenize for CJK languages if needed
     if lang_code in CJK_LANGUAGES and CJK_TOKENIZATION_AVAILABLE:
@@ -351,7 +318,6 @@ def evaluate_language(model, processor, lang_code, dataset_name, num_samples=Non
 
     # Calculate BLEU-4
     print(f"Calculating BLEU-4 for {lang_code}...")
-    bleu_metric = BLEU(max_ngram_order=4)
     tokenized_references_transposed = [[ref[0] for ref in tokenized_references]]
     bleu_score = bleu_metric.corpus_score(tokenized_predictions, tokenized_references_transposed)
 
@@ -366,13 +332,93 @@ def evaluate_language(model, processor, lang_code, dataset_name, num_samples=Non
     references_dict = {i: refs for i, refs in enumerate(tokenized_references)}
     cider_score, _ = cider_scorer.compute_score(references_dict, predictions_dict)
 
+    return {
+        "bleu4": bleu_score.score,
+        "chrf": chrf_score.score,
+        "cider": cider_score * 100
+    }
+
+
+def evaluate_language(model, processor, lang_code, test_data, num_samples=None, output_folder=None):
+    """Evaluate model on a specific language"""
+
+    print(f"\n{'=' * 80}")
+    print(f"Evaluating {LANGUAGE_NAMES[lang_code]} ({lang_code})")
+    print(f"{'=' * 80}")
+
+    if test_data is None:
+        print(f"No data available for {lang_code}, skipping...")
+        return None, None, None
+
+    # Limit samples if specified
+    if num_samples:
+        test_data = test_data[:min(num_samples, len(test_data))]
+
+    print(f"Processing {len(test_data)} examples...")
+
+    predictions = []
+    references = []
+
+    # Generate captions
+    for i, example in enumerate(tqdm(test_data, desc=f"Generating {lang_code}")):
+        # Clear memory more frequently
+        if i % 5 == 0:
+            sync_all_devices()
+            clear_memory()
+
+        try:
+            generated_caption = generate_caption(
+                model,
+                processor,
+                example['image'],
+                example['content'],
+                lang_code,
+                timeout_seconds=120
+            )
+
+            predictions.append(generated_caption)
+            references.append([example['caption']])
+
+            sync_all_devices()
+
+            # Print sample outputs
+            if i < 3:
+                print(f"\nSample {i + 1}:")
+                print(f"Generated: {generated_caption}")
+                print(f"Reference: {example['caption']}")
+                print("-" * 80)
+
+            # Save intermediate results every 100 samples
+            if output_folder and (i + 1) % 100 == 0:
+                try:
+                    intermediate_file = os.path.join(output_folder, f"predictions_{lang_code}_checkpoint_{i + 1}.json")
+                    with open(intermediate_file, "w", encoding="utf-8") as f:
+                        json.dump({
+                            "predictions": predictions,
+                            "references": [ref[0] for ref in references],
+                            "completed": i + 1
+                        }, f, ensure_ascii=False, indent=2)
+                    print(f"\nCheckpoint saved: {intermediate_file}")
+                except Exception as save_e:
+                    print(f"\nWarning: Could not save checkpoint: {save_e}")
+
+        except Exception as e:
+            print(f"Error on example {i}: {e}")
+            predictions.append("")
+            references.append([example['caption']])
+            sync_all_devices()
+            clear_memory()
+
+    # Calculate metrics
+    metrics = calculate_metrics(predictions, references, lang_code)
+
     results = {
         "language": lang_code,
         "language_name": LANGUAGE_NAMES[lang_code],
         "num_samples": len(predictions),
-        "bleu4": bleu_score.score,
-        "chrf": chrf_score.score,
-        "cider": cider_score * 100
+        "bleu4": metrics["bleu4"],
+        "chrf": metrics["chrf"],
+        "cider": metrics["cider"]
     }
 
     print(f"\nResults for {LANGUAGE_NAMES[lang_code]}:")
@@ -382,12 +428,15 @@ def evaluate_language(model, processor, lang_code, dataset_name, num_samples=Non
 
     # Save language-specific predictions
     if output_folder:
-        lang_output = {
-            "predictions": predictions,
-            "references": [ref[0] for ref in references]
-        }
-        with open(os.path.join(output_folder, f"predictions_{lang_code}.json"), "w", encoding="utf-8") as f:
-            json.dump(lang_output, f, ensure_ascii=False, indent=2)
+        try:
+            lang_output = {
+                "predictions": predictions,
+                "references": [ref[0] for ref in references]
+            }
+            with open(os.path.join(output_folder, f"predictions_{lang_code}.json"), "w", encoding="utf-8") as f:
+                json.dump(lang_output, f, ensure_ascii=False, indent=2)
+        except Exception as save_e:
+            print(f"Warning: Could not save predictions: {save_e}")
 
     return results, predictions, references
 
@@ -416,6 +465,9 @@ def main():
     if num_samples:
         print(f"Samples per language: {num_samples}")
 
+    # Try to increase file limit
+    increase_file_limit()
+
     # Create output folder
     output_folder = os.path.join("outputs", "image_captioning", model_id.split('/')[-1])
     if not os.path.exists(output_folder):
@@ -426,7 +478,10 @@ def main():
         num_gpus = torch.xpu.device_count()
         print(f"Number of XPU devices available: {num_gpus}")
 
-    # Clear any existing memory
+    # PRE-LOAD ALL DATASETS FIRST (before loading model)
+    all_datasets = preload_all_datasets(dataset_name, eval_languages)
+
+    # Clear memory before loading model
     clear_memory()
 
     # Load model and processor
@@ -461,19 +516,26 @@ def main():
 
     for lang in eval_languages:
         try:
+            test_data = all_datasets.get(lang)
+
             results, preds, refs = evaluate_language(
                 model,
                 processor,
                 lang,
-                dataset_name=dataset_name,
+                test_data=test_data,
                 num_samples=num_samples,
                 output_folder=output_folder
             )
-            all_results.append(results)
-            all_predictions[lang] = preds
-            all_references[lang] = [ref[0] for ref in refs]
+
+            if results is not None:
+                all_results.append(results)
+                all_predictions[lang] = preds
+                all_references[lang] = [ref[0] for ref in refs]
 
             log_gpu_memory()
+
+            # Force garbage collection between languages
+            gc.collect()
 
         except Exception as e:
             print(f"Error evaluating {lang}: {e}")
@@ -482,78 +544,81 @@ def main():
             continue
 
     # Create results DataFrame
-    results_df = pd.DataFrame(all_results)
+    if all_results:
+        results_df = pd.DataFrame(all_results)
 
-    # Print summary
-    print("\n" + "=" * 80)
-    print(f"FINAL RESULTS SUMMARY - {model_id}")
-    print("=" * 80)
-    print(results_df.to_string(index=False))
+        # Print summary
+        print("\n" + "=" * 80)
+        print(f"FINAL RESULTS SUMMARY - {model_id}")
+        print("=" * 80)
+        print(results_df.to_string(index=False))
 
-    # Save results
-    results_file = os.path.join(output_folder, "evaluation_results.csv")
-    results_df.to_csv(results_file, index=False)
-    print(f"\n✓ Results saved to {results_file}")
+        # Save results
+        results_file = os.path.join(output_folder, "evaluation_results.csv")
+        results_df.to_csv(results_file, index=False)
+        print(f"\n✓ Results saved to {results_file}")
 
-    # Save detailed predictions
-    predictions_file = os.path.join(output_folder, "all_predictions.json")
-    with open(predictions_file, "w", encoding="utf-8") as f:
-        json.dump({
-            "predictions": all_predictions,
-            "references": all_references
-        }, f, ensure_ascii=False, indent=2)
-    print(f"✓ Predictions saved to {predictions_file}")
+        # Save detailed predictions
+        predictions_file = os.path.join(output_folder, "all_predictions.json")
+        with open(predictions_file, "w", encoding="utf-8") as f:
+            json.dump({
+                "predictions": all_predictions,
+                "references": all_references
+            }, f, ensure_ascii=False, indent=2)
+        print(f"✓ Predictions saved to {predictions_file}")
 
-    # Calculate and save summary statistics
-    summary_file = os.path.join(output_folder, "summary.txt")
-    with open(summary_file, 'w', encoding='utf-8') as f:
-        f.write(f"Image Captioning Evaluation Results\n")
-        f.write(f"Model: {model_id}\n")
-        f.write(f"Dataset: {dataset_name}\n")
-        f.write(f"Languages: {eval_languages}\n")
-        f.write("=" * 60 + "\n\n")
+        # Calculate and save summary statistics
+        summary_file = os.path.join(output_folder, "summary.txt")
+        with open(summary_file, 'w', encoding='utf-8') as f:
+            f.write(f"Image Captioning Evaluation Results\n")
+            f.write(f"Model: {model_id}\n")
+            f.write(f"Dataset: {dataset_name}\n")
+            f.write(f"Languages: {eval_languages}\n")
+            f.write("=" * 60 + "\n\n")
 
-        f.write("Per-Language Results:\n")
-        f.write(results_df.to_string(index=False))
-        f.write("\n\n")
+            f.write("Per-Language Results:\n")
+            f.write(results_df.to_string(index=False))
+            f.write("\n\n")
 
-        f.write("Average Scores Across All Languages:\n")
-        f.write(f"  Average BLEU-4: {results_df['bleu4'].mean():.2f}\n")
-        f.write(f"  Average chrF:   {results_df['chrf'].mean():.2f}\n")
-        f.write(f"  Average CIDEr:  {results_df['cider'].mean():.2f}\n")
+            f.write("Average Scores Across All Languages:\n")
+            f.write(f"  Average BLEU-4: {results_df['bleu4'].mean():.2f}\n")
+            f.write(f"  Average chrF:   {results_df['chrf'].mean():.2f}\n")
+            f.write(f"  Average CIDEr:  {results_df['cider'].mean():.2f}\n")
 
-        # CJK-specific averages
-        cjk_results = results_df[results_df['language'].isin(CJK_LANGUAGES)]
-        if not cjk_results.empty:
-            f.write("\nAverage Scores for CJK Languages (ja, zh, yue):\n")
-            f.write(f"  Average BLEU-4: {cjk_results['bleu4'].mean():.2f}\n")
-            f.write(f"  Average chrF:   {cjk_results['chrf'].mean():.2f}\n")
-            f.write(f"  Average CIDEr:  {cjk_results['cider'].mean():.2f}\n")
+            # CJK-specific averages
+            cjk_results = results_df[results_df['language'].isin(CJK_LANGUAGES)]
+            if not cjk_results.empty:
+                f.write("\nAverage Scores for CJK Languages (ja, zh, yue):\n")
+                f.write(f"  Average BLEU-4: {cjk_results['bleu4'].mean():.2f}\n")
+                f.write(f"  Average chrF:   {cjk_results['chrf'].mean():.2f}\n")
+                f.write(f"  Average CIDEr:  {cjk_results['cider'].mean():.2f}\n")
 
-        # Non-CJK averages
-        non_cjk_results = results_df[~results_df['language'].isin(CJK_LANGUAGES)]
-        if not non_cjk_results.empty:
-            f.write("\nAverage Scores for Non-CJK Languages:\n")
-            f.write(f"  Average BLEU-4: {non_cjk_results['bleu4'].mean():.2f}\n")
-            f.write(f"  Average chrF:   {non_cjk_results['chrf'].mean():.2f}\n")
-            f.write(f"  Average CIDEr:  {non_cjk_results['cider'].mean():.2f}\n")
+            # Non-CJK averages
+            non_cjk_results = results_df[~results_df['language'].isin(CJK_LANGUAGES)]
+            if not non_cjk_results.empty:
+                f.write("\nAverage Scores for Non-CJK Languages:\n")
+                f.write(f"  Average BLEU-4: {non_cjk_results['bleu4'].mean():.2f}\n")
+                f.write(f"  Average chrF:   {non_cjk_results['chrf'].mean():.2f}\n")
+                f.write(f"  Average CIDEr:  {non_cjk_results['cider'].mean():.2f}\n")
 
-        # GPU info
-        if hasattr(torch, 'xpu') and torch.xpu.is_available():
-            f.write(f"\nGPU Configuration:\n")
-            f.write(f"  Number of GPUs: {torch.xpu.device_count()}\n")
-            for i in range(torch.xpu.device_count()):
-                allocated = torch.xpu.memory_allocated(i) / 1024 ** 3
-                reserved = torch.xpu.memory_reserved(i) / 1024 ** 3
-                f.write(f"  GPU {i} - Allocated: {allocated:.2f} GB, Reserved: {reserved:.2f} GB\n")
+            # GPU info
+            if hasattr(torch, 'xpu') and torch.xpu.is_available():
+                f.write(f"\nGPU Configuration:\n")
+                f.write(f"  Number of GPUs: {torch.xpu.device_count()}\n")
+                for i in range(torch.xpu.device_count()):
+                    allocated = torch.xpu.memory_allocated(i) / 1024 ** 3
+                    reserved = torch.xpu.memory_reserved(i) / 1024 ** 3
+                    f.write(f"  GPU {i} - Allocated: {allocated:.2f} GB, Reserved: {reserved:.2f} GB\n")
 
-    print(f"✓ Summary saved to {summary_file}")
+        print(f"✓ Summary saved to {summary_file}")
 
-    # Print averages
-    print("\nAverage Scores Across All Languages:")
-    print(f"  Average BLEU-4: {results_df['bleu4'].mean():.2f}")
-    print(f"  Average chrF:   {results_df['chrf'].mean():.2f}")
-    print(f"  Average CIDEr:  {results_df['cider'].mean():.2f}")
+        # Print averages
+        print("\nAverage Scores Across All Languages:")
+        print(f"  Average BLEU-4: {results_df['bleu4'].mean():.2f}")
+        print(f"  Average chrF:   {results_df['chrf'].mean():.2f}")
+        print(f"  Average CIDEr:  {results_df['cider'].mean():.2f}")
+    else:
+        print("\nNo results to report!")
 
     log_gpu_memory()
 
