@@ -15,7 +15,7 @@ conda activate /home/dn-rana1/rds/conda_envs/llm_exp
 export HF_HOME=//home/dn-rana1/rds/rds-airr-p39-JpwWyPZa2Oc/hf_home/
 export HF_TOKEN=""
 
-python -m mllm.dawn.qwen3 --model_id Qwen/Qwen3-VL-8B-Instruct
+python -m mllm.dawn_qwen3 --model_id Qwen/Qwen3-VL-8B-Instruct
 
 
 
