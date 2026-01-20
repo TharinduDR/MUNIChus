@@ -12,6 +12,13 @@ module load intelpython-conda/2025.0
 
 conda activate /home/dn-rana1/rds/conda_envs/llm_exp
 
+# Intel XPU stability environment variables
+export IPEX_TILE_AS_DEVICE=0
+export ZE_FLAT_DEVICE_HIERARCHY=COMPOSITE
+export SYCL_PI_LEVEL_ZERO_USE_IMMEDIATE_COMMANDLISTS=1
+export NEOReadDebugKeys=1
+export ClDeviceGlobalMemSizeAvailablePercent=95
+
 export HF_HOME=//home/dn-rana1/rds/rds-airr-p39-JpwWyPZa2Oc/hf_home/
 export HF_TOKEN=""
 
