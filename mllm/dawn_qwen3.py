@@ -2,6 +2,8 @@ import argparse
 import os
 import gc
 import json
+import signal
+from functools import wraps
 
 import torch
 import intel_extension_for_pytorch as ipex
@@ -12,10 +14,42 @@ from tqdm import tqdm
 from sacrebleu.metrics import BLEU, CHRF
 from pycocoevalcap.cider.cider import Cider
 
+
+class TimeoutError(Exception):
+    pass
+
+
+def timeout(seconds):
+    """Decorator to add timeout to a function"""
+
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            def handler(signum, frame):
+                raise TimeoutError(f"Function timed out after {seconds} seconds")
+
+            # Set the signal handler
+            old_handler = signal.signal(signal.SIGALRM, handler)
+            signal.alarm(seconds)
+
+            try:
+                result = func(*args, **kwargs)
+            finally:
+                signal.alarm(0)
+                signal.signal(signal.SIGALRM, old_handler)
+
+            return result
+
+        return wrapper
+
+    return decorator
+
+
 # For Japanese/Chinese tokenization
 try:
     import jieba
     import MeCab
+
     CJK_TOKENIZATION_AVAILABLE = True
 except ImportError:
     print("Warning: jieba or MeCab not installed. Install with:")
@@ -49,8 +83,8 @@ def log_gpu_memory():
         print("\n" + "=" * 60)
         print("GPU Memory Usage:")
         for i in range(torch.xpu.device_count()):
-            allocated = torch.xpu.memory_allocated(i) / 1024**3
-            reserved = torch.xpu.memory_reserved(i) / 1024**3
+            allocated = torch.xpu.memory_allocated(i) / 1024 ** 3
+            reserved = torch.xpu.memory_reserved(i) / 1024 ** 3
             print(f"  GPU {i}:")
             print(f"    Allocated: {allocated:.2f} GB")
             print(f"    Reserved:  {reserved:.2f} GB")
@@ -58,12 +92,21 @@ def log_gpu_memory():
 
 
 def clear_memory():
-    """Aggressively clear GPU memory"""
+    """Aggressively clear GPU memory with explicit synchronization"""
     gc.collect()
     if hasattr(torch, 'xpu'):
         for i in range(torch.xpu.device_count()):
             with torch.xpu.device(i):
+                torch.xpu.synchronize()  # Wait for all operations to complete
                 torch.xpu.empty_cache()
+                torch.xpu.synchronize()  # Ensure cache is cleared
+
+
+def sync_all_devices():
+    """Force synchronization across all XPU devices"""
+    if hasattr(torch, 'xpu') and torch.xpu.is_available():
+        for i in range(torch.xpu.device_count()):
+            with torch.xpu.device(i):
                 torch.xpu.synchronize()
 
 
@@ -91,8 +134,8 @@ def tokenize_text(text, lang_code):
     return text
 
 
-def generate_caption(model, processor, image, news_content, language):
-    """Generate caption using Qwen3-VL"""
+def generate_caption(model, processor, image, news_content, language, timeout_seconds=120):
+    """Generate caption using Qwen3-VL with timeout protection"""
 
     prompt = f"""You are writing a caption for a newspaper image.
 
@@ -121,7 +164,7 @@ Caption in {LANGUAGE_NAMES[language]}:"""
         }
     ]
 
-    try:
+    def _generate():
         inputs = processor.apply_chat_template(
             messages,
             tokenize=True,
@@ -131,7 +174,14 @@ Caption in {LANGUAGE_NAMES[language]}:"""
         )
         inputs = inputs.to(model.device)
 
+        # Explicit sync before generation
+        sync_all_devices()
+
         generated_ids = model.generate(**inputs, max_new_tokens=100)
+
+        # Explicit sync after generation
+        sync_all_devices()
+
         generated_ids_trimmed = [
             out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
         ]
@@ -142,8 +192,28 @@ Caption in {LANGUAGE_NAMES[language]}:"""
             clean_up_tokenization_spaces=False
         )
 
-        caption = output_text[0].strip()
+        return output_text[0].strip()
+
+    try:
+        # Set up timeout using signal
+        def handler(signum, frame):
+            raise TimeoutError(f"Generation timed out after {timeout_seconds} seconds")
+
+        old_handler = signal.signal(signal.SIGALRM, handler)
+        signal.alarm(timeout_seconds)
+
+        try:
+            caption = _generate()
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, old_handler)
+
         return caption
+
+    except TimeoutError as e:
+        print(f"Timeout: {e}")
+        clear_memory()
+        return ""
 
     except RuntimeError as e:
         error_str = str(e)
@@ -152,37 +222,50 @@ Caption in {LANGUAGE_NAMES[language]}:"""
             clear_memory()
 
             try:
-                inputs = processor.apply_chat_template(
-                    messages,
-                    tokenize=True,
-                    add_generation_prompt=True,
-                    return_dict=True,
-                    return_tensors="pt"
-                )
-                inputs = inputs.to(model.device)
+                old_handler = signal.signal(signal.SIGALRM, handler)
+                signal.alarm(timeout_seconds)
 
-                generated_ids = model.generate(**inputs, max_new_tokens=50)
-                generated_ids_trimmed = [
-                    out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
-                ]
+                try:
+                    inputs = processor.apply_chat_template(
+                        messages,
+                        tokenize=True,
+                        add_generation_prompt=True,
+                        return_dict=True,
+                        return_tensors="pt"
+                    )
+                    inputs = inputs.to(model.device)
+                    sync_all_devices()
 
-                output_text = processor.batch_decode(
-                    generated_ids_trimmed,
-                    skip_special_tokens=True,
-                    clean_up_tokenization_spaces=False
-                )
+                    generated_ids = model.generate(**inputs, max_new_tokens=50)
+                    sync_all_devices()
 
-                return output_text[0].strip()
+                    generated_ids_trimmed = [
+                        out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+                    ]
+
+                    output_text = processor.batch_decode(
+                        generated_ids_trimmed,
+                        skip_special_tokens=True,
+                        clean_up_tokenization_spaces=False
+                    )
+
+                    return output_text[0].strip()
+                finally:
+                    signal.alarm(0)
+                    signal.signal(signal.SIGALRM, old_handler)
+
             except Exception as retry_e:
                 print(f"Retry failed: {retry_e}")
                 clear_memory()
                 return ""
         else:
             print(f"Error generating caption: {e}")
+            clear_memory()
             return ""
 
     except Exception as e:
         print(f"Error generating caption: {e}")
+        clear_memory()
         return ""
 
 
@@ -207,8 +290,9 @@ def evaluate_language(model, processor, lang_code, dataset_name, num_samples=Non
 
     # Generate captions
     for i, example in enumerate(tqdm(test_data, desc=f"Generating {lang_code}")):
-        # Clear memory periodically
-        if i % 10 == 0:
+        # Clear memory more frequently (every 5 samples) and sync
+        if i % 5 == 0:
+            sync_all_devices()
             clear_memory()
 
         try:
@@ -217,11 +301,15 @@ def evaluate_language(model, processor, lang_code, dataset_name, num_samples=Non
                 processor,
                 example['image'],
                 example['content'],
-                lang_code
+                lang_code,
+                timeout_seconds=120  # 2 minute timeout per sample
             )
 
             predictions.append(generated_caption)
             references.append([example['caption']])
+
+            # Sync after each successful generation
+            sync_all_devices()
 
             # Print sample outputs
             if i < 3:
@@ -230,10 +318,22 @@ def evaluate_language(model, processor, lang_code, dataset_name, num_samples=Non
                 print(f"Reference: {example['caption']}")
                 print("-" * 80)
 
+            # Save intermediate results every 100 samples
+            if output_folder and (i + 1) % 100 == 0:
+                intermediate_file = os.path.join(output_folder, f"predictions_{lang_code}_checkpoint_{i + 1}.json")
+                with open(intermediate_file, "w", encoding="utf-8") as f:
+                    json.dump({
+                        "predictions": predictions,
+                        "references": [ref[0] for ref in references],
+                        "completed": i + 1
+                    }, f, ensure_ascii=False, indent=2)
+                print(f"\nCheckpoint saved: {intermediate_file}")
+
         except Exception as e:
             print(f"Error on example {i}: {e}")
             predictions.append("")
             references.append([example['caption']])
+            sync_all_devices()
             clear_memory()
 
     # Initialize metrics
@@ -443,8 +543,8 @@ def main():
             f.write(f"\nGPU Configuration:\n")
             f.write(f"  Number of GPUs: {torch.xpu.device_count()}\n")
             for i in range(torch.xpu.device_count()):
-                allocated = torch.xpu.memory_allocated(i) / 1024**3
-                reserved = torch.xpu.memory_reserved(i) / 1024**3
+                allocated = torch.xpu.memory_allocated(i) / 1024 ** 3
+                reserved = torch.xpu.memory_reserved(i) / 1024 ** 3
                 f.write(f"  GPU {i} - Allocated: {allocated:.2f} GB, Reserved: {reserved:.2f} GB\n")
 
     print(f"✓ Summary saved to {summary_file}")
