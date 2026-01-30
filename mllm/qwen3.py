@@ -87,21 +87,23 @@ except ImportError:
 
 # Initialize model and processor
 print("Loading Qwen3-VL-8B-Instruct...")
+# model = Qwen3VLForConditionalGeneration.from_pretrained(
+#     "Qwen/Qwen3-VL-8B-Instruct",
+#     torch_dtype="auto",
+#     device_map="auto"
+# )
+
 model = Qwen3VLForConditionalGeneration.from_pretrained(
     "Qwen/Qwen3-VL-8B-Instruct",
-    torch_dtype="auto",
-    device_map="auto"
+    torch_dtype=torch.bfloat16,
+    attn_implementation="flash_attention_2",
+    device_map="auto",
 )
+
 
 processor = AutoProcessor.from_pretrained("Qwen/Qwen3-VL-8B-Instruct")
 
 # Optional: Enable flash attention for better performance
-# model = Qwen3VLForConditionalGeneration.from_pretrained(
-#     "Qwen/Qwen3-VL-8B-Instruct",
-#     torch_dtype=torch.bfloat16,
-#     attn_implementation="flash_attention_2",
-#     device_map="auto",
-# )
 
 # Initialize metrics
 chrf_metric = CHRF()
