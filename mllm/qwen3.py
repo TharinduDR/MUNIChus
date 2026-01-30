@@ -39,14 +39,15 @@ except ImportError:
     print("  pip install pyvi")
 
 try:
-    from konlpy.tag import Okt
+    from kiwipiepy import Kiwi
 
     KOREAN_AVAILABLE = True
-    korean_tokenizer = Okt()
+    korean_tokenizer = None  # Lazy initialization
 except ImportError:
     KOREAN_AVAILABLE = False
-    print("Warning: konlpy not installed for Korean tokenization.")
-    print("  pip install konlpy")
+    korean_tokenizer = None
+    print("Warning: kiwipiepy not installed for Korean tokenization.")
+    print("  pip install kiwipiepy")
 
 try:
     from laonlp.tokenize import word_tokenize as lao_tokenize
@@ -76,34 +77,33 @@ except ImportError:
     print("  pip install pyidaungsu")
 
 try:
-    from botok import WordTokenizer
+    import botok
 
     TIBETAN_AVAILABLE = True
-    tibetan_tokenizer = WordTokenizer()
+    tibetan_tokenizer = None  # Lazy initialization
 except ImportError:
     TIBETAN_AVAILABLE = False
+    tibetan_tokenizer = None
     print("Warning: botok not installed for Tibetan tokenization.")
     print("  pip install botok")
 
 # Initialize model and processor
 print("Loading Qwen3-VL-8B-Instruct...")
-# model = Qwen3VLForConditionalGeneration.from_pretrained(
-#     "Qwen/Qwen3-VL-8B-Instruct",
-#     torch_dtype="auto",
-#     device_map="auto"
-# )
-
 model = Qwen3VLForConditionalGeneration.from_pretrained(
     "Qwen/Qwen3-VL-8B-Instruct",
     torch_dtype=torch.bfloat16,
     attn_implementation="flash_attention_2",
     device_map="auto",
 )
-
-
 processor = AutoProcessor.from_pretrained("Qwen/Qwen3-VL-8B-Instruct")
 
 # Optional: Enable flash attention for better performance
+# model = Qwen3VLForConditionalGeneration.from_pretrained(
+#     "Qwen/Qwen3-VL-8B-Instruct",
+#     torch_dtype=torch.bfloat16,
+#     attn_implementation="flash_attention_2",
+#     device_map="auto",
+# )
 
 # Initialize metrics
 chrf_metric = CHRF()
@@ -198,6 +198,7 @@ SPECIAL_TOKENIZATION_LANGUAGES = {
 
 def tokenize_text(text, lang_code):
     """Tokenize text appropriately based on language"""
+    global korean_tokenizer, tibetan_tokenizer
 
     if lang_code not in SPECIAL_TOKENIZATION_LANGUAGES:
         return text
@@ -213,8 +214,15 @@ def tokenize_text(text, lang_code):
             return mecab.parse(text).strip()
 
         elif lang_type == "korean" and KOREAN_AVAILABLE:
-            tokens = korean_tokenizer.morphs(text)
-            return " ".join(tokens)
+            try:
+                if korean_tokenizer is None:
+                    from kiwipiepy import Kiwi
+                    korean_tokenizer = Kiwi()
+                tokens = korean_tokenizer.tokenize(text)
+                return " ".join([token.form for token in tokens])
+            except Exception as e:
+                print(f"Korean tokenization failed: {e}, using character-level")
+                return " ".join(list(text.replace(" ", "")))
 
         elif lang_type == "thai" and THAI_AVAILABLE:
             tokens = thai_tokenize(text, engine="newmm")
@@ -236,8 +244,15 @@ def tokenize_text(text, lang_code):
             return " ".join(tokens)
 
         elif lang_type == "tibetan" and TIBETAN_AVAILABLE:
-            tokens = tibetan_tokenizer.tokenize(text, split_affixes=False)
-            return " ".join([t.text for t in tokens])
+            try:
+                if tibetan_tokenizer is None:
+                    from botok import WordTokenizer
+                    tibetan_tokenizer = WordTokenizer()
+                tokens = tibetan_tokenizer.tokenize(text, split_affixes=False)
+                return " ".join([t.text for t in tokens])
+            except Exception as e:
+                print(f"Tibetan tokenization failed: {e}, using character-level")
+                return " ".join(list(text.replace(" ", "")))
 
         else:
             # Fallback to character-level tokenization
@@ -318,6 +333,8 @@ def evaluate_language(lang_code, dataset_name="tharindu/XL-MUNIChus", num_sample
     """Evaluate Qwen3-VL model on a specific language with BLEU-4, CIDEr, and chrF"""
 
     print(f"\n{'=' * 80}")
+    print(f"Evaluating {language_names[lang_code]} ({lang_code})")
+    print(f"{'=' * 80}")
 
     # Load test set
     try:
@@ -409,7 +426,6 @@ def evaluate_language(lang_code, dataset_name="tharindu/XL-MUNIChus", num_sample
     return results, predictions, references
 
 
-
 # Main execution
 if __name__ == "__main__":
     # Evaluate all languages
@@ -465,6 +481,3 @@ if __name__ == "__main__":
     print(f"Average BLEU-4: {results_df['bleu4'].mean():.2f}")
     print(f"Average chrF:   {results_df['chrf'].mean():.2f}")
     print(f"Average CIDEr:  {results_df['cider'].mean():.2f}")
-
-
-    print("✓ Analysis summary saved to xl_munichus_analysis_summary.json")
