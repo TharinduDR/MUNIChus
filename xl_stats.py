@@ -1,6 +1,4 @@
 from datasets import load_dataset
-from numpy.core.defchararray import str_len
-from sipbuild.generator.parser.annotations import string_list
 from tqdm import tqdm
 import pandas as pd
 import json
