@@ -9,3 +9,10 @@ pycocoevalcap
 jieba
 mecab-python3
 unidic-lite
+pythainlp
+pyvi
+kiwipiepy
+LaoNLP
+khmer-nltk
+pyidaungsu
+botok
