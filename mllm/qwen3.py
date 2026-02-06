@@ -111,8 +111,8 @@ cider_scorer = Cider()
 
 # XL-MUNIChus language codes (ISO 639-3)
 languages = [
-    "amh", "ara", "bam", "ben", "bod", "bos", "bul", "ckb", "cmn", "cym",
-    "deu", "eng", "fas", "fra", "gla", "guj", "hat", "hau", "hin", "hrv",
+    # "amh", "ara", "bam", "ben", "bod", "bos", "bul", "ckb", "cmn", "cym",
+    # "deu", "eng", "fas", "fra", "gla", "guj", "hat", "hau", "hin", "hrv",
     "hye", "ibo", "ind", "jpn", "kat", "khm", "kin", "kir", "kmr", "kor",
     "lao", "lin", "mar", "mkd", "mya", "nde", "nep", "orm", "pan", "pcm",
     "pol", "prs", "pus", "ron", "rus", "sin", "sna", "som", "sqi", "srp",
