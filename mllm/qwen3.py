@@ -68,7 +68,7 @@ except ImportError:
     print("  pip install khmer-nltk")
 
 try:
-    from pyidaungsu import tokenize as myanmar_tokenize
+    import pyidaungsu as pds
 
     MYANMAR_AVAILABLE = True
 except ImportError:
@@ -91,10 +91,10 @@ except ImportError:
 print("Loading Qwen3-VL-8B-Instruct...")
 model = Qwen3VLForConditionalGeneration.from_pretrained(
     "Qwen/Qwen3-VL-8B-Instruct",
-    torch_dtype=torch.bfloat16,
-    attn_implementation="flash_attention_2",
-    device_map="auto",
+    torch_dtype="auto",
+    device_map="auto"
 )
+
 processor = AutoProcessor.from_pretrained("Qwen/Qwen3-VL-8B-Instruct")
 
 # Optional: Enable flash attention for better performance
@@ -240,7 +240,7 @@ def tokenize_text(text, lang_code):
             return " ".join(tokens)
 
         elif lang_type == "burmese" and MYANMAR_AVAILABLE:
-            tokens = myanmar_tokenize(text, form="word")
+            tokens = pds.tokenize(text, form="word")
             return " ".join(tokens)
 
         elif lang_type == "tibetan" and TIBETAN_AVAILABLE:
